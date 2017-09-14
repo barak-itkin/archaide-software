@@ -1,0 +1,6 @@
+.idea/
+venv/
+
+tensorflow-resnet-pretrained-20160509
+__pycache__
+*.model

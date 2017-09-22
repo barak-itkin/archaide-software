@@ -76,22 +76,22 @@ documentation.
 Train the model on all images in the folder. The label of each image will be
 the name of the folder containing it:
 ```
-python -m appearance train path/to/data --model example.model
+python -m c3d.appearance train path/to/data --model example.model
 ```
 
 Classify all images in a given folder. For each image, list the top 3 guesses:
 ```
-python -m appearance classify path/to/image/folder --model example.model --k 3
+python -m c3d.appearance classify path/to/image/folder --model example.model --k 3
 ```
 
 Evaluate our training - split the data into train and test. Train on the train
 data, and evaluate our accuracy on the test data. Check the accuracy on the
 top 3 guesses, and repeat this train-eval process 5 times:
 ```
-python -m appearance eval path/to/images --k 3 --num-runs 5
+python -m c3d.appearance eval path/to/images --k 3 --num-runs 5
 ```
 
 Additional arguments can be found using the `--help` flag:
 ```
-python -m appearance --help
+python -m c3d.appearance --help
 ```

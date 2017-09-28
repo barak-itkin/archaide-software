@@ -36,7 +36,9 @@ class ConfusionMatrix:
           The second dimension is for multiple predictions per sample.
         """
         n = len(labels)
-        predictions = np.asarray(predictions).reshape((n, -1))
+        predictions = np.asarray(predictions)
+        if predictions.ndim == 1:
+            predictions = predictions.reshape((n, -1))
         if n != predictions.shape[0] or self.depth != predictions.shape[1]:
             raise ValueError('Dimension mismatch!')
         # Pop another dimension into the predictions, if we have only one dimension
@@ -78,10 +80,13 @@ class ConfusionMatrix:
     @property
     def class_acc(self):
         input = self.input_histogram
-        print(self.diagonal)
-        print(input)
         nonz_input = input + (input == 0)
-        return self.diagonal / np.tile(nonz_input.reshape(1, self.size), [self.depth, 1])
+        # Tile the 1D as rows of a matrix, with height by the depth
+        deep_nonz_input = np.tile(
+            nonz_input.reshape(1, self.size),
+            [self.depth, 1]
+        )
+        return self.diagonal / deep_nonz_input
 
     @property
     def cumulative_class_acc(self):
@@ -89,7 +94,7 @@ class ConfusionMatrix:
 
     @property
     def cumulative_acc(self):
-        return np.cumsum(np.sum(self.diagonal / self.n, 1))
+        return np.cumsum(self.acc)
 
     @property
     def cumulative_balanced_acc(self):

@@ -1,9 +1,7 @@
 import collections
-import logging
 import numpy
 import os
-import pickle
-import skimage
+import skimage.io
 
 
 FileId = collections.namedtuple('FileId', 'label id')
@@ -115,6 +113,11 @@ class Dataset:
     def files_batch_test_iter(self, *args, **kwargs):
         return self.files_batch_iter(
                 file_ids=self.file_ids_test_iter(), *args, **kwargs
+        )
+
+    def all_labels(self):
+        return set(
+            f_id.label for f_id in self.file_ids_iter()
         )
 
 

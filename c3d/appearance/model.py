@@ -8,6 +8,9 @@ import tensorflow as tf
 from sklearn import svm
 
 
+import c3d.classification
+
+
 # returns image of shape [224, 224, 3]
 # [height, width, depth]
 def box_crop(img, size=224):
@@ -81,10 +84,9 @@ def reverse_dict(src):
     return dict((val, key) for (key, val) in src.items())
 
 
-class Classifier:
+class Classifier(c3d.classification.FeatureClassifier):
     def __init__(self, dataset, resnet_dir, tf_session=None, cache_path=None):
-        self._tf_session = tf_session
-        self.dataset = dataset
+        super(Classifier, self).__init__(dataset, tf_session)
         self.resnet_dir = resnet_dir
         self.cache_path = cache_path
 
@@ -95,17 +97,8 @@ class Classifier:
         self.data_features = []
         self.data_ids = []
 
-        self.label_to_index = {}
-        self.index_to_label = {}
-
         self.feature_mean = None
         self.feature_std = None
-
-    @property
-    def tf_session(self):
-        if not self._tf_session:
-            self._tf_session = self._tf_session or tf.Session()
-        return self._tf_session
 
     @property
     def data_labels(self):
@@ -124,9 +117,7 @@ class Classifier:
         )
         return os.path.join(self.resnet_dir, name)
 
-    def compute_resnet_features(self, images):
-        if self.resnet_features_out is None:
-            self.load_resnet()
+    def _compute_features(self, images):
         return self.tf_session.run(self.resnet_features_out, {
             self.resnet_images_in: images
         })
@@ -164,6 +155,10 @@ class Classifier:
 
         # The input placeholder
         self.resnet_images_in = get_output('images')
+
+    def _prepare(self):
+        super(Classifier, self)._prepare()
+        self.load_resnet()
 
     def augment_image(self, img):
         imgs = multiply(img_scale, [img])
@@ -212,16 +207,10 @@ class Classifier:
                     processed += 1
                 resnet_input_images = np.asarray(resnet_input_images)
                 self.data_features.extend(
-                        self.compute_resnet_features(resnet_input_images))
+                        self.compute_features(resnet_input_images))
                 logging.info('Processed %06d/%06d images', processed, n_images)
 
             logging.info('Done caching image feautres')
-            all_labels = set(self.data_labels)
-            self.label_to_index = dict(
-                (label, i) for i, label in enumerate(sorted(all_labels))
-            )
-            self.index_to_label = reverse_dict(self.label_to_index)
-
             self._save_cache()
 
         # Regardless of how we got the cache, these stats should be computed.
@@ -232,24 +221,15 @@ class Classifier:
     def prepare_features_for_clf(self, features):
         return (np.asarray(features) - self.feature_mean) / self.feature_std
 
-    def predict_top_k_from_features(self, resnet_features, k):
-        distances = self.clf.decision_function(
-                self.prepare_features_for_clf(resnet_features))
-        n_classes = distances.shape[1]
-        top_indexes = np.argpartition(distances, n_classes - k, 1)[:, -k:]
-        # Set a minus on the distances to make the sort descending
-        ordered_top_indexes = np.argsort(-distances.take(top_indexes))
-        return top_indexes.take(ordered_top_indexes)
-
-    def predict_top_k(self, images, k):
-        return self.predict_top_k_from_features(
-                self.compute_resnet_features(images), k)
+    def _classify_features_to_all(self, features):
+        return self.clf.decision_function(
+            self.prepare_features_for_clf(features))
 
     def train_indices(self):
         return [i for i, id in enumerate(self.data_ids)
                 if self.dataset.is_train_file(id)]
 
-    def train(self):
+    def _train(self):
         self.cache_features()
         train_indices = self.train_indices()
 
@@ -270,7 +250,7 @@ class Classifier:
 
     def test(self):
         self.cache_features()
-        test_indices = self.train_indices()
+        test_indices = self.test_indices()
 
         X = self.prepare_features_for_clf(self.data_features[test_indices])
         Y = self.data_labels_numeric[test_indices]
@@ -279,25 +259,20 @@ class Classifier:
 
     # Implement pickle support
     def __getstate__(self):
-        return {
-            'dataset': self.dataset,
-            'cache_path': self.cache_path,
-            'resnet_dir': self.resnet_dir,
-            'clf': self.clf,
-            'label_to_index': self.label_to_index,
-            'feature_mean': self.feature_mean,
-            'feature_std': self.feature_std
-        }
+        state = super(Classifier, self).__getstate__()
+        state['cache_path'] = self.cache_path
+        state['resnet_dir'] = self.resnet_dir
+        state['clf'] = self.clf
+        state['feature_mean'] = self.feature_mean
+        state['feature_std'] = self.feature_std
         return state
 
     def __setstate__(self, state):
         self.__init__(
             state['dataset'], state['resnet_dir'],
-            cache_path=state.get('cache_path', None)
+            cache_path=state.get('cache_path', None),
+            label_to_index=state['label_to_index'],
         )
         self.clf = state['clf']
-        self.label_to_index = state['label_to_index']
-        self.index_to_label = reverse_dict(self.label_to_index)
         self.feature_mean = state['feature_mean']
         self.feature_std = state['feature_std']
-

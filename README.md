@@ -95,3 +95,37 @@ Additional arguments can be found using the `--help` flag:
 ```
 python -m c3d.appearance --help
 ```
+
+### Shape based similarity
+
+Train the model on all images in the folder. The label of each image will be
+the name of the folder containing it:
+```
+python -m c3d.shape example.model path/to/data train
+```
+The data can be in one of two flavors:
+
+1. JSON files representing c3d.datamodel.Fracture objects. In that case, the
+   file names must end with `.fracture.json`
+1. Single-channel 256x256 grayscale images, with white representing the
+   fracture and black representing the background.
+
+Note that **it is OK to interrupt the training with Ctrl+C** - in the case the
+model that'll be saved is what was trained so far. Furthermore, running the
+same command again will continue training where it has previously stopped.
+
+Classify all images in a given folder. For each image, list the top 3 guesses:
+```
+python -m c3d.shape example.model path/to/data --k 3 classify
+```
+
+Evaluate our training - check the accuracy of our model on the data that was
+left out for testing during the training process:
+```
+python -m c3d.shape example.model path/to/data --k 3 classify
+```
+
+Additional arguments can be found using the `--help` flag:
+```
+python -m c3d.shape --help
+```

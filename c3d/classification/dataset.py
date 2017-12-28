@@ -4,23 +4,29 @@ import os
 import skimage.io
 
 
-FileId = collections.namedtuple('FileId', 'label id')
+AUGMENT_PREFIX = '$augment.'
+AUGMENT_SUFFIX = '$$'
+
+
+FileId = collections.namedtuple('FileId', 'label id augment')
+NamedSample = collections.namedtuple('NamedSample', 'name sample')
 
 
 class Dataset:
     def __init__(self, data_root, train_to_test_ratio=None):
         self.train_to_test_ratio = train_to_test_ratio
         self.has_test = train_to_test_ratio is not None
-        self.data_root = data_root
+        self.data_root = os.path.abspath(data_root)
         self.shuffle_seed = 0
+        self.num_sherds = 1
+        self.sherd_id = 0
 
     def shuffle(self):
         self.shuffle_seed += 1
 
     def label_from_path(self, dirpath, filename):
-        # By default, the label of a file is its dirname. We assume there is
-        # no nesting of folders to deeper levels.
-        return os.path.basename(dirpath)
+        # By default, the label of a file is its dirname (in the dataset)
+        return os.path.relpath(dirpath, self.data_root)
 
     def id_from_path(self, dirpath, filename):
         # By default, the ID of a file is its name
@@ -36,9 +42,18 @@ class Dataset:
         return file_id.label
 
     def file_path(self, file_id):
+        dirname = self.file_dir(file_id)
+        fname = self.file_name(file_id)
+
+        if file_id.augment:
+            augment_part = AUGMENT_PREFIX + file_id.augment + AUGMENT_SUFFIX
+            if '.' in fname:
+                augment_part += '.' + fname.split('.', 1)[-1]
+        else:
+            augment_part = ''
+
         return os.path.join(
-                self.data_root,
-                self.file_dir(file_id), self.file_name(file_id)
+            self.data_root, dirname, fname + augment_part
         )
 
     def file_filter(self, dirname, filename):
@@ -53,13 +68,24 @@ class Dataset:
             # Make the dirpath canonical so names can be extracted reliably
             dirpath.rstrip(os.path.sep)
             for filename in files:
+                if AUGMENT_PREFIX in filename:
+                    filename, augment = filename.split(AUGMENT_PREFIX, 1)
+                    assert AUGMENT_SUFFIX in augment
+                    augment, ext = augment.rsplit(AUGMENT_SUFFIX, 1)
+                    if ext:
+                        assert ext[0] == '.'
+                        assert filename.endswith(ext)
+                else:
+                    augment = None
+
                 if not self.file_filter(dirpath, filename):
                     continue
                 f = FileId(
-                        self.label_from_path(dirpath, filename),
-                        self.id_from_path(dirpath, filename)
+                    label=self.label_from_path(dirpath, filename),
+                    id=self.id_from_path(dirpath, filename),
+                    augment=augment
                 )
-                if self.file_id_filter(f):
+                if self.file_id_filter(f) and hash(f) % self.num_sherds == self.sherd_id:
                     yield f
 
     def file_ids_train_iter(self):
@@ -97,9 +123,14 @@ class Dataset:
                         self.prepare_file(f_id) for f_id in ids
                     ]
 
+    def files_iter(self, num_epochs=1, file_ids=None, no_prepare=False):
+        for batch_ids, batch_files in self.files_batch_iter(1, num_epochs, file_ids, no_prepare):
+            for id, f in zip(batch_ids, batch_files):
+                yield id, f
+
     def is_train_file(self, file_id):
         return (not self.has_test
-                or hash((file_id, self.shuffle_seed)) % self.train_to_test_ratio
+                or hash((file_id.unaugmented(), self.shuffle_seed)) % self.train_to_test_ratio
                     != 0)
 
     def is_test_file(self, file_id):
@@ -121,13 +152,48 @@ class Dataset:
         )
 
 
+def augment(named_samples, augment_function):
+    for ns in named_samples:
+        for augmented in augment_function(ns.sample):
+            new_name = (
+                (ns.name or augmented.name) if not (augmented.name and ns.name)
+                else '%s.%s' % (ns.name, augmented.name)
+            )
+            yield NamedSample(new_name, augmented.sample)
+
+
+def make_augmented_id(file_id, augment_name):
+    if not augment_name:
+        return file_id
+    else:
+        return FileId(file_id.label, file_id.id, augment_name)
+
+
 IMAGE_EXTENSIONS = set(['bmp', 'png', 'tiff', 'tif', 'jpg', 'jpeg'])
 
 
 class ImageDataset(Dataset):
+    def __init__(self, *args, **kwargs):
+        super(ImageDataset, self).__init__(*args, **kwargs)
+        self.filters = []
+
     def prepare_file(self, file_id):
-        return skimage.io.imread(self.file_path(file_id))
+        img = skimage.io.imread(self.file_path(file_id))
+        for f in self.filters:
+            img = f(img)
+        return img
 
     def file_filter(self, dirpath, filename):
         return ('.' in filename
                 and filename.split('.')[-1].lower() in IMAGE_EXTENSIONS)
+
+
+def im2rgb(img):
+    if len(img.shape) == 3:  # Row X Column X Channel
+        if img.shape[-1] == 3:  # RGB
+            return img
+        elif img.shape[-1] == 4:  # RGBA
+            return img[:, :, :3]
+    elif len(img.shape) == 2:  # Row X Column
+        return np.repeat(img[:, :, np.newaxis], 3, axis=2)
+    raise ValueError('Unexpected image shape %s' % img.shape)

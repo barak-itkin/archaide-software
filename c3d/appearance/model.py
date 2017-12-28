@@ -2,49 +2,11 @@ import logging
 import os
 import pickle
 import numpy as np
-import skimage.io
-import skimage.transform
 import tensorflow as tf
 from sklearn import svm
 
 
 import c3d.classification
-
-
-# returns image of shape [224, 224, 3]
-# [height, width, depth]
-def box_crop(img, size=224):
-    short_edge = min(img.shape[:2])
-    yy = int((img.shape[0] - short_edge) / 2)
-    xx = int((img.shape[1] - short_edge) / 2)
-    crop_img = img[yy:yy + short_edge, xx:xx + short_edge]
-    resized_img = skimage.transform.resize(crop_img, (size, size))
-    return resized_img
-
-
-def symmetric_pad(start, end, width):
-    size = end - start
-    if size > width:
-        raise NotImplementedError('Only supports padding, not cropping')
-    elif size == width:
-        return np.arange(start, end)
-    else:
-        pad = width - size
-        pad_s = pad // 2
-        pad_e = pad - pad_s
-        result = np.zeros(width, dtype=np.int32) + start
-        result[-pad_e:] = end - 1
-        result[pad_s:(pad_s+size)] = np.arange(start, end)
-        return result
-
-
-def box_fit(img, size=224):
-    if img.shape[0] > img.shape[1]:
-        pad_img = img[:, symmetric_pad(0, img.shape[1], img.shape[0]), :]
-    else:
-        pad_img = img[symmetric_pad(0, img.shape[0], img.shape[1]), :, :]
-    resized_img = skimage.transform.resize(pad_img, (size, size))
-    return resized_img
 
 
 def load_resnet_mean_bgr():
@@ -55,40 +17,28 @@ def resnet_preprocess(img):
     """Changes RGB [0,1] valued image to BGR [0,255] with mean subtracted."""
     mean_bgr = load_resnet_mean_bgr()
     out = np.copy(img) * 255.0
-    out = out[:, :, [2, 1, 0]]  # swap channel from RGB to BGR
+    # swap channel from RGB to BGR
+    if img.ndim == 3 and img.shape[-1] == 3:
+        out = out[:, :, [2, 1, 0]]
+    elif img.ndim == 4 and img.shape[-1] == 3:
+        out = out[:, :, :, [2, 1, 0]]
+    else:
+        raise ValueError('Unknown image/batch dimension ' + str(img.shape))
     out -= mean_bgr
     return out
 
 
-def multiply(function, iterable):
-    for val in iterable:
-        for result in function(val):
-            yield result
-
-
-def img_scale(img):
-    yield box_fit(img)
-    yield box_fit(img, 284)[20:244,20:244,:]
-    yield box_fit(img, 324)[40:264,40:264,:]
-    yield box_crop(img)
-
-
-def img_augment(img):
-    yield img
-    #yield img + 0.01 * np.random.rand(*img.shape)
-    yield np.flip(img, 0)
-    yield np.flip(img, 1)
-
-
-def reverse_dict(src):
-    return dict((val, key) for (key, val) in src.items())
-
-
 class Classifier(c3d.classification.FeatureClassifier):
-    def __init__(self, dataset, resnet_dir, tf_session=None, cache_path=None):
+    def __init__(self, dataset, resnet_dir, tf_session=None, cache_dir=None, max_train_samples=None, skip_validations=False):
         super(Classifier, self).__init__(dataset, tf_session)
+        if not skip_validations and not os.path.isdir(resnet_dir):
+            raise ValueError('Invalid resnet dir %s' % resnet_dir)
         self.resnet_dir = resnet_dir
-        self.cache_path = cache_path
+        if not skip_validations and not os.path.isdir(cache_dir):
+            os.makedirs(cache_dir)
+        self.cache_dir = cache_dir
+        self.cache_path = os.path.join(cache_dir, 'decor_feature_cache.pickle')
+        self.temp_cache_path = os.path.join(cache_dir, 'decor_feature_cache.temp.pickle')
 
         self.resnet_features_out = None
         self.resnet_images_in = None
@@ -99,6 +49,8 @@ class Classifier(c3d.classification.FeatureClassifier):
 
         self.feature_mean = None
         self.feature_std = None
+
+        self.max_train_samples = max_train_samples
 
     @property
     def data_labels(self):
@@ -160,28 +112,31 @@ class Classifier(c3d.classification.FeatureClassifier):
         super(Classifier, self)._prepare()
         self.load_resnet()
 
-    def augment_image(self, img):
-        imgs = multiply(img_scale, [img])
-        imgs = multiply(img_augment, imgs)
-        return imgs
-
-    def _load_cache(self):
-        if self.cache_path and os.path.exists(self.cache_path):
+    def _load_cache(self, temp=False):
+        path = self.temp_cache_path if temp else self.cache_path
+        if path and os.path.exists(path):
             logging.info('Loading cached image feautres')
-            with open(self.cache_path, 'rb') as f:
+            with open(path, 'rb') as f:
                 self.data_features, self.data_ids, self.label_to_index = (
                         pickle.load(f)
                 )
                 return True
         return False
 
-    def _save_cache(self):
-        if not self.cache_path:
+    def _save_cache(self, temp=False):
+        path = self.temp_cache_path if temp else self.cache_path
+        if not path:
             return
 
-        with open(self.cache_path, 'wb') as f:
+        with open(path if temp else path, 'wb') as f:
             pickle.dump(
                     (self.data_features, self.data_ids, self.label_to_index), f)
+
+    def _has_enough_train_samples(self):
+        if self.max_train_samples is None or self.max_train_samples <= 0:
+            return False
+        else:
+            return len(self.data_features) >= self.max_train_samples
 
     def cache_features(self):
         # Did we already cache and finish the following computations?
@@ -191,27 +146,31 @@ class Classifier(c3d.classification.FeatureClassifier):
         # Only compute if we can't load from cache?
         if not self._load_cache():
             logging.info('Starting to cache image feautres')
-            processed = 0
             n_images = self.dataset.count()
 
-            for batch_ids, batchs_imgs in self.dataset.files_batch_iter(
-                    batch_size=10, num_epochs=1):
-                # Create a batch of images to evaluate in ResNet each time,
-                # instead of evaluating them one by one, to allow higher
-                # efficiency.
-                resnet_input_images = []
-                for file_id, img in zip(batch_ids, batchs_imgs):
-                    img_augments = list(self.augment_image(img))
-                    resnet_input_images.extend(img_augments)
-                    self.data_ids.extend([file_id] * len(img_augments))
-                    processed += 1
-                resnet_input_images = np.asarray(resnet_input_images)
-                self.data_features.extend(
-                        self.compute_features(resnet_input_images))
-                logging.info('Processed %06d/%06d images', processed, n_images)
+            if self._load_cache(temp=True):
+                existing = set(self.data_ids)
+                logging.info('Loaded a temporary cache with %d images' % len(existing))
+            else:
+                existing = set()
+            missing = set(self.dataset.file_ids_iter()) - existing
+
+            if not self._has_enough_train_samples():
+                b = 0
+                for batch_ids, batchs_imgs in self.dataset.files_batch_iter(
+                        batch_size=100, num_epochs=1, file_ids=missing):
+                    self.data_ids.extend(batch_ids)
+                    self.data_features.extend(self.compute_features(batchs_imgs))
+                    logging.info('Processed %06d/%06d images', len(self.data_ids), n_images)
+                    b += 1
+                    if b % 10 == 0:
+                        self._save_cache(temp=True)
+                    if self._has_enough_train_samples():
+                        break
+
+                self._save_cache()
 
             logging.info('Done caching image feautres')
-            self._save_cache()
 
         # Regardless of how we got the cache, these stats should be computed.
         self.data_features = np.asarray(self.data_features)
@@ -219,11 +178,20 @@ class Classifier(c3d.classification.FeatureClassifier):
         self.feature_std = np.std(self.data_features, 0)
 
     def prepare_features_for_clf(self, features):
-        return (np.asarray(features) - self.feature_mean) / self.feature_std
+        nonzero_std = self.feature_std + (self.feature_std == 0)
+        return (np.asarray(features) - self.feature_mean) / nonzero_std
 
     def _classify_features_to_all(self, features):
-        return self.clf.decision_function(
+        messy_scores = self.clf.decision_function(
             self.prepare_features_for_clf(features))
+        # WARNING: THE SCORES RETURNED ARE IN THE ORDER CORRESPONDING TO
+        #     self.clf.classes_
+        # THIS MAY BE DIFFERENT THAN THE NATURAL ORDERING OF THE LABELS (I.E.
+        # THE SCORES MAY BE FOR CLASSES IN A NON-SORTED ORDER).
+        n_samples = len(features)
+        result = -np.inf * np.ones((n_samples, self.n_classes))
+        result[:, self.clf.classes_] = messy_scores
+        return result
 
     def train_indices(self):
         return [i for i, id in enumerate(self.data_ids)
@@ -232,6 +200,12 @@ class Classifier(c3d.classification.FeatureClassifier):
     def _train(self):
         self.cache_features()
         train_indices = self.train_indices()
+        # Make sure no order exists in the input to SVM (in case the internal
+        # implementation doesn't shuffle)
+        np.random.shuffle(train_indices)
+        # Use less train indices if specified (random because of shuffling)
+        if self.max_train_samples is not None and self.max_train_samples > 0 and len(train_indices) > self.max_train_samples:
+            train_indices = train_indices[:self.max_train_samples]
 
         X = self.prepare_features_for_clf(self.data_features[train_indices])
         Y = self.data_labels_numeric[train_indices]
@@ -260,7 +234,7 @@ class Classifier(c3d.classification.FeatureClassifier):
     # Implement pickle support
     def __getstate__(self):
         state = super(Classifier, self).__getstate__()
-        state['cache_path'] = self.cache_path
+        state['cache_dir'] = self.cache_dir
         state['resnet_dir'] = self.resnet_dir
         state['clf'] = self.clf
         state['feature_mean'] = self.feature_mean
@@ -270,9 +244,10 @@ class Classifier(c3d.classification.FeatureClassifier):
     def __setstate__(self, state):
         self.__init__(
             state['dataset'], state['resnet_dir'],
-            cache_path=state.get('cache_path', None),
-            label_to_index=state['label_to_index'],
+            cache_dir=state.get('cache_dir', None),
+            skip_validations=True
         )
+        self.label_to_index = state['label_to_index']
         self.clf = state['clf']
         self.feature_mean = state['feature_mean']
         self.feature_std = state['feature_std']

@@ -73,25 +73,70 @@ documentation.
 
 ### Appearance based similarity
 
-Train the model on all images in the folder. The label of each image will be
-the name of the folder containing it:
+#### Data Augmentation
+
+To acheive improved accuracy with small amounts of images, we use an
+*augmentation* process - that is, enriching the collection of images by creating
+more versions (with different scales/croppings) of each original image.
+
+To do this, we first use the following tool on the folder containing the original
+data:
+
 ```
-python -m c3d.appearance train path/to/data --model example.model
+python -m c3d.appearance.make_dataset \
+  path/to/raw/data/folder \
+  path/to/augmented/data/folder
 ```
+
+This will create the new augmented folder with many more versions of the images.
+You should use this augmented folder for training.
+
+#### Training
+
+Train the model on images in the folder (leaving out some images for testing).
+The label of each image will be the name of the folder containing it:
+
+```
+python -m c3d.appearance \
+  example.model path/to/data \
+  --resnet-dir=path/to/resnet-dir \
+  train
+```
+
+#### Classifying
 
 Classify all images in a given folder. For each image, list the top 3 guesses:
+
 ```
-python -m c3d.appearance classify path/to/image/folder --model example.model --k 3
+python -m c3d.appearance \
+  example.model path/to/data \
+  --k=3
+  classify
 ```
 
-Evaluate our training - split the data into train and test. Train on the train
-data, and evaluate our accuracy on the test data. Check the accuracy on the
-top 3 guesses, and repeat this train-eval process 5 times:
+Note: If the resnet dir is not were it was before and fails to load, you can
+specify it again using `--resnet_dir` (before the `classify` action).
+
+#### Testing
+
+Evaluate our training - test the model on the images that were left out for
+testing, listing top 5 guesses:
+
 ```
-python -m c3d.appearance eval path/to/images --k 3 --num-runs 5
+python -m c3d.appearance \
+  example.model path/to/data \
+  --k=3
+  test
 ```
+
+Note: The test should be carried out either on the folder with the source images
+(OK even if you have an augmented folder, and this is preferred) or on the
+augmented folder (discouraged).
+
+#### Further help
 
 Additional arguments can be found using the `--help` flag:
+
 ```
 python -m c3d.appearance --help
 ```

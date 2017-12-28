@@ -46,22 +46,34 @@ class FeatureClassifier:
         return self._tf_session
 
     def predict_top_k_from_features(self, features, k):
-        # (sample_num) X (score of class)
+        # Get the scores per class for all the features
+        # -> (sample_num) X (score of class)
         scores = self.classify_features_to_all(features)
-        n_classes = scores.shape[1]
-        # (sample_num) X (classes of top K scores)
-        top_indices = np.argpartition(scores, n_classes - k, 1)[:, -k:]
-        # (sample_num) X (indices to sort the rows of `top_indices` rows, by
-        #                 descending score)
-        # Set a minus on the distances to make the sort descending
-        ordered_top_indices = np.argsort(-scores.take(top_indices))
-        # (sample_num) X (indices of top K scores, by descending score)
-        return np.array([
-            top_sample_indices.take(ordered_sample_indices)
-            for top_sample_indices, ordered_sample_indices in zip(
-                top_indices, ordered_top_indices
-            )
-        ])
+        n_samples, n_classes = scores.shape
+
+        # On dimension 1 (second dimension - samples), partition the scores
+        # in descending order, and take the top k (first k)
+        # (sample_num) X (class indices of top K scores)
+        top_col_indices = np.argpartition(-scores, k, 1)[:, :k]
+
+        # In `top_indices`, each row now contains column indices within that
+        # row. To use these to index into scores, we just put these where we'd
+        # usually write a column index.
+        # However, we also need a matching array of row indices into the
+        # scores in order to index this way.
+        row_indices = np.tile(
+            np.arange(n_samples).reshape(n_samples, 1),
+            (1, k)
+        )
+
+        # (sample_num) X (scores of top K classes)
+        top_scores = scores[row_indices, top_col_indices]
+
+        # We now want to sort these top scores in descending order
+        ordered_top_indices = np.argsort(-top_scores, 1)
+
+        # And this is the ordering among the top classes (indices) per row
+        return top_col_indices[row_indices, ordered_top_indices]
 
     def predict_top_k(self, inputs, k):
         return self.predict_top_k_from_features(

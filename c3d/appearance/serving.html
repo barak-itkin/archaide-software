@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Loading...</title>
+    <script
+      src="https://code.jquery.com/jquery-3.1.1.min.js"
+      integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8="
+      crossorigin="anonymous"></script>
+    <script>
+
+        var cache = {};
+
+        function base() {
+            var result = window.location.protocol + '//' + window.location.hostname;
+            if (window.location.port) {
+                result += ':' + window.location.port;
+            }
+            return result + '/';
+        }
+
+        function request(path, data, type) {
+            on_waiting();
+            var data = data || {};
+            if (type == 'post') {
+                var formData = new FormData();
+                for (var key in data) {
+                    formData.append(key, data[key]);
+                }
+                return $.ajax({
+                    url: base() + path,
+                    method: 'post',
+                    type: 'post',
+                    dataType: 'json',
+                    contentType: false,
+                    processData: false,
+                    data: formData
+                });
+            } else {
+                return $.ajax({
+                    url: base() + path,
+                    type: 'get',
+                    dataType: 'json',
+                    data: data
+                });
+            }
+        }
+
+        function on_waiting() {
+            $('#status').text('Waiting').css('color', 'crimson');
+        }
+
+        function on_done() {
+            $('#status').text('Done').css('color', 'olive');
+        }
+
+        function initialize() {
+            // Check for the various File API support.
+            if (window.File && window.FileReader && window.FileList && window.Blob) {
+              // Great success! All the File APIs are supported.
+            } else {
+              alert('The File APIs are not fully supported in this browser.');
+            }
+            $('#files').on('change', handleFileSelect);
+        }
+
+        function on_classes(classes) {
+            $('#result_classes').text(classes.join(', '));
+        }
+
+        function on_image(name, data) {
+            request('classify_image', {
+                name: name,
+                data: data
+            }, 'post').done(function (data) {
+                on_classes(data['classes']);
+                on_done();
+            });
+        }
+
+        function handleFileSelect(evt) {
+            var files = evt.target.files; // FileList object
+
+            var reader = new FileReader();
+                if (files[0].name.toLowerCase().endsWith('.jpg')) {
+                    // If we use onloadend, we need to check the readyState.
+                    reader.onloadend = function(evt) {
+                        if (evt.target.readyState == FileReader.DONE) { // DONE == 2
+                            on_image(files[0].name, evt.target.result);
+                        }
+                    };
+                }
+            var blob = files[0].slice(0, files[0].size);
+            reader.readAsBinaryString(blob);
+        }
+
+    </script>
+</head>
+<body onload="initialize()">
+    <div style="width: 500px">
+    <div id="status">Ready</div>
+    <hr />
+    <div id="result_classes">No input yet</div>
+    <hr />
+    <input type="file" id="files" onchange="" name="files[]" />
+    <output id="list"></output>
+    </div>
+</body>
+</html>

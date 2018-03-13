@@ -94,6 +94,9 @@ if args.action == TRAIN:
             max_train_samples=args.max_train_samples)
     c.cache_features()
     c.train()
+    with open(args.model_path, 'wb') as f:
+        pickle.dump(c, f)
+
 
 else:
     with open(args.model_path, 'rb') as f:

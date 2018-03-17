@@ -8,6 +8,7 @@ import sys
 
 from . import make_dataset
 from c3d.serving import webserver
+import c3d.util.math
 
 
 class AppearanceContext(object):
@@ -23,10 +24,10 @@ class AppearanceContext(object):
         img = PIL.Image.open(io.BytesIO(blob)).convert('RGB')
         img = np.array(img)
         ready_img = make_dataset.prepare_img(img)
-        print(ready_img.shape)
-        print(ready_img.dtype)
-        label_indices = self.model.predict_top_k([ready_img], self.k)[0]
-        return [self.model.index_to_label[i] for i in label_indices]
+        label_indices, label_scores = self.model.predict_top_k([ready_img], self.k, with_scores=True)
+        label_scores = c3d.util.math.sigmoid(label_scores)
+        label_indices, label_scores = list(label_indices[0]), list(label_scores[0])
+        return [(self.model.index_to_label[i], score) for i, score in zip(label_indices, label_scores)]
 
 
 class AppearanceClassificationServlet(webserver.ServerHandler):
@@ -42,15 +43,18 @@ class AppearanceClassificationServlet(webserver.ServerHandler):
     def classify_image(self, parameters):
         name = parameters['name'].strip()
         data = parameters['data']
+        scores = self.context.classify_image(data)
+        print('Scores: %s' % scores)
         return json.dumps({
-            name: name,
-            'classes': self.context.classify_image(data)
+            'name': name,
+            'ranking': [{'class': pair[0], 'score': pair[1]}
+                        for pair in scores],
         })
 
 
 def main(argv):
     if len(argv) < 2 or len(argv) > 4 or '--help' in argv:
-        print('Usage: %s model_path [k] [resnet_dir]')
+        print('Usage: %s model_path [k] [resnet_dir]' % os.path.basename(__file__))
         return
     context = AppearanceContext(*sys.argv[1:])
     webserver.serve_forever(8000, AppearanceClassificationServlet, context)

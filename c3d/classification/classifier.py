@@ -45,7 +45,7 @@ class FeatureClassifier:
             self._tf_session = self._tf_session or tf.get_default_session() or tf.Session()
         return self._tf_session
 
-    def predict_top_k_from_features(self, features, k):
+    def predict_top_k_from_features(self, features, k, with_scores=False):
         # Get the scores per class for all the features
         # -> (sample_num) X (score of class)
         scores = self.classify_features_to_all(features)
@@ -73,11 +73,16 @@ class FeatureClassifier:
         ordered_top_indices = np.argsort(-top_scores, 1)
 
         # And this is the ordering among the top classes (indices) per row
-        return top_col_indices[row_indices, ordered_top_indices]
+        result = top_col_indices[row_indices, ordered_top_indices]
 
-    def predict_top_k(self, inputs, k):
+        if not with_scores:
+            return result
+        else:
+            return result, top_scores[np.arange(n_samples), ordered_top_indices]
+
+    def predict_top_k(self, inputs, k, with_scores=False):
         return self.predict_top_k_from_features(
-                self.compute_features(inputs), k)
+            self.compute_features(inputs), k, with_scores=with_scores)
 
     def cache_label_to_index(self):
         if not self.label_to_index:

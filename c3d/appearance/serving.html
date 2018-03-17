@@ -61,14 +61,17 @@
         }
 
         function on_classes(classes) {
-            $('#result_classes').text(classes.join(', '));
+            $('#result_classes').text(
+                classes.map(
+                    pair => pair.class + ' (' + (100 * pair.score).toFixed(2) + '%)'
+                ).join(', '));
         }
 
         function on_image(name, form) {
             var data = new FormData(form);
             data.append('name', name);
             request('classify_image', data, 'post').done(function (data) {
-                on_classes(data['classes']);
+                on_classes(data['ranking']);
                 on_done();
             });
         }

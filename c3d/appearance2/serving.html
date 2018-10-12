@@ -8,9 +8,7 @@
       integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8="
       crossorigin="anonymous"></script>
     <script>
-
         var cache = {};
-
         function base() {
             var result = window.location.protocol + '//' + window.location.hostname;
             if (window.location.port) {
@@ -18,7 +16,6 @@
             }
             return result + '/';
         }
-
         function request(path, data, type) {
             on_waiting();
             var data = data || {};
@@ -41,15 +38,12 @@
                 });
             }
         }
-
         function on_waiting() {
             $('#status').text('Waiting').css('color', 'crimson');
         }
-
         function on_done() {
             $('#status').text('Done').css('color', 'olive');
         }
-
         function initialize() {
             // Check for the various File API support.
             if (window.File && window.FileReader && window.FileList && window.Blob) {
@@ -59,14 +53,12 @@
             }
             $('#files').on('change', handleFileSelect);
         }
-
         function on_classes(classes) {
             $('#result_classes').text(
                 classes.map(
                     pair => pair.class + ' (' + (100 * pair.score).toFixed(2) + '%)'
                 ).join(', '));
         }
-
         function on_image(name, form) {
             var data = new FormData(form);
             data.append('name', name);
@@ -75,14 +67,12 @@
                 on_done();
             });
         }
-
         function handleFileSelect(evt) {
             var files = evt.target.files; // FileList object
             if (!files || files.length == 0)
                 return;
             on_image(files[0].name, evt.target.form);
         }
-
     </script>
 </head>
 <body onload="initialize()">

@@ -6,27 +6,22 @@ import pickle
 import PIL.Image
 import sys
 
-from . import make_dataset
+from c3d.appearance2.input import prepare_img
 from c3d.serving import webserver
-import c3d.util.math
 
 
 class AppearanceContext(object):
     def __init__(self, model_path, k=3, resnet_dir=None):
         with open(model_path, 'rb') as f:
             self.model = pickle.load(f)
-        if resnet_dir:
-            self.model.resnet_dir = resnet_dir
-        self.model.load_resnet()
         self.k = int(k)
 
     def classify_image(self, blob):
         img = PIL.Image.open(io.BytesIO(blob)).convert('RGB')
         img = np.array(img)
-        ready_img = make_dataset.prepare_img(img)
+        ready_img = prepare_img(img)
         label_indices, label_scores = self.model.predict_top_k([ready_img], self.k, with_scores=True)
-        label_scores = c3d.util.math.sigmoid(label_scores)
-        label_indices, label_scores = list(label_indices[0]), list(label_scores[0])
+        label_indices, label_scores = list(label_indices[0]), [float(v) for v in label_scores[0]]
         return [(self.model.index_to_label[i], score) for i, score in zip(label_indices, label_scores)]
 
 
@@ -53,8 +48,8 @@ class AppearanceClassificationServlet(webserver.ServerHandler):
 
 
 def main(argv):
-    if len(argv) < 2 or len(argv) > 4 or '--help' in argv:
-        print('Usage: %s model_path [k] [resnet_dir]' % os.path.basename(__file__))
+    if len(argv) < 2 or len(argv) > 3 or '--help' in argv:
+        print('Usage: %s model_path [k]' % os.path.basename(__file__))
         return
     context = AppearanceContext(*sys.argv[1:])
     webserver.serve_forever(8000, AppearanceClassificationServlet, context)

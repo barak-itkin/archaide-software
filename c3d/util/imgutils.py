@@ -1,5 +1,7 @@
 import numpy as np
 import skimage.transform
+import tensorflow as tf
+from c3d.util.rect import CvRect
 
 
 def scale(img, size):
@@ -49,14 +51,85 @@ def symmetric_pad(start, end, width):
         return result
 
 
+def mask_bounding_box(mask, padding=0):
+    mask_xs = np.arange(mask.shape[1])[np.any(mask, axis=0)]
+    mask_ys = np.arange(mask.shape[0])[np.any(mask, axis=1)]
+    return CvRect(
+        xmin=mask_xs[0] - padding,
+        ymin=mask_ys[0] - padding,
+        width=mask_xs[-1] - mask_xs[0] + 1 + 2 * padding,
+        height=mask_ys[-1] - mask_ys[0] + 1 + 2 * padding
+    )
+
+
+def tf_mask_bounding_box(mask, padding=0):
+    if mask.dtype != tf.bool:
+        raise ValueError('Expected boolean mask!')
+    coords = tf.where(mask)
+    c_min = tf.reduce_min(coords, axis=0)
+    c_max = tf.reduce_max(coords, axis=0)
+    return CvRect(
+        xmin=c_min[1] - padding,
+        ymin=c_min[0] - padding,
+        width=c_max[1] - c_min[1] + 1 + 2 * padding,
+        height=c_max[0] - c_min[0] + 1 + 2 * padding
+    )
+
+
+def autocrop(img, mask=None):
+    if img.ndim != 3:
+        raise ValueError('Expected an image with color channels, but input '
+                         'dimension is not 3!')
+    if mask is None:
+        if img.shape[2] != 4:
+            raise ValueError('Expected RGBA image if a mask is not '
+                             'provided!')
+        mask = img[:, :, 3] > 0
+    box = mask_bounding_box(mask)
+    return img[
+       box.ymin:box.ymax + 1,
+       box.xmin:box.xmax + 1,
+    ]
+
+
+def tf_autocrop(img):
+    mask = img[:, :, 3] > 0
+    box = tf_mask_bounding_box(mask)
+    return img[
+       box.ymin:box.ymax + 1,
+       box.xmin:box.xmax + 1,
+    ]
+
+
+def img_to_uint8(img):
+    if type(img) is not np.ndarray:
+        raise ValueError('Images should be Numpy ndarray objects!')
+    elif 'float' in img.dtype.name and img.max() <= 1:
+        return np.uint8(255 * img)
+    else:
+        return img
+
+
+def img_to_float(img):
+    if type(img) is not np.ndarray:
+        raise ValueError('Images should be Numpy ndarray objects!')
+    elif 'float' not in img.dtype.name and img.max() <= 255:
+        return np.float32(img / 255.)
+    else:
+        return img
+
+
 def load_resnet_mean_bgr():
-    raise NotImplementedError()
+    # TODO: Obtain the mean RGB values of ResNet.
+    # For now we're using a value that was picked by manual checks on data
+    return 20. / 255.
 
 
-def resnet_preprocess(img):
-    """Changes RGB [0,1] valued image to BGR [0,255] with mean subtracted."""
-    mean_bgr = load_resnet_mean_bgr()
-    out = np.copy(img) * 255.0
-    out = out[:, :, [2, 1, 0]]  # swap channel from RGB to BGR
-    out -= mean_bgr
-    return out
+def resnet_preprocess(img_or_batch):
+    """Prepare a uint8 RGB image for ResNet input"""
+    img_or_batch = np.asanyarray(img_or_batch)
+    if not 3 <= img_or_batch.ndim <= 4 or img_or_batch.shape[-1] != 3:
+        raise ValueError('Expected RGB image/batch, but got shape=%s' % str(img_or_batch.shape))
+    img_or_batch = img_to_float(img_or_batch)
+    bgr = img_or_batch[..., [2, 1, 0]] - load_resnet_mean_bgr()
+    return bgr

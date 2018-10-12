@@ -5,11 +5,13 @@ import pickle
 import sys
 
 from c3d.classification import ConfusionMatrix, ImageDataset
-from .make_dataset import prepare_img
+from c3d.util import imgutils
 from .model import Classifier
+from .input import RandomTransformCropper, fill_bg_with_black
+
 
 FORMAT = '%(asctime)-15s %(message)s'
-logging.basicConfig(stream=sys.stdout, format=FORMAT, level=logging.DEBUG)
+logging.basicConfig(stream=sys.stdout, format=FORMAT, level=logging.INFO)
 
 TRAIN = 'train'
 TEST = 'test'
@@ -19,7 +21,7 @@ ACTIONS = [TRAIN, TEST, CLASSIFY]
 
 def make_parser():
     # Training settings
-    parser = argparse.ArgumentParser(description='Fracture shape based classifier')
+    parser = argparse.ArgumentParser(description='Appearance based classifier')
 
     parser.add_argument('model_path', type=str, metavar='model-path',
                         help='Path for saving/loading the model file')
@@ -28,19 +30,12 @@ def make_parser():
 
     parser.add_argument('--disable-tensorflow-logs', default=False,
                         action='store_true', help='Hide logging by TensorFlow')
-    parser.add_argument('--k', type=int, default=1, required=False,
-                        help='Number of best classes to predict')
+    parser.add_argument('--k', type=int, default=3, required=False,
+                        help='Number of top classes to predict')
     parser.add_argument('--train-to-test-ratio', type=int, default=6,
                         required=False,
                         help='The ratio (num of train samples) / (num of '
                         'test samples)')
-    parser.add_argument('--resnet-dir', type=str, default=None,
-                        required=False,
-                        help='The directory containing the pre-trained ResNet '
-                        'models')
-    parser.add_argument('--eval-batch-size', type=int, default=100,
-                        required=False,
-                        help='Number of images in an evaluation batch.')
 
     actions = parser.add_subparsers(dest='action')
 
@@ -49,9 +44,13 @@ def make_parser():
                               default='cache', required=False,
                               help="Directory for caching features during the "
                               "train (in case it's interrupted)")
-    train_parser.add_argument('--max-train-samples', type=int, default=-1, required=False,
-                              help='If specified, sets the maximal amount of train images '
-                             'to use in the training process')
+    train_parser.add_argument('--summary_dir', type=str,
+                              default='summary', required=False,
+                              help="Directory for writing tensorboard summaries")
+    train_parser.add_argument('--resnet-dir', type=str, default=None,
+                              required=False,
+                              help='The directory containing the pre-trained ResNet '
+                              'models')
 
     test_parser = actions.add_parser(TEST,
                                      help='Evaluate the training process. Use '
@@ -82,23 +81,33 @@ if args.disable_tensorflow_logs:
     # And also silence the native code
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-data = ImageDataset(args.data_dir)
-data.filters.append(prepare_img)
+data = ImageDataset(args.data_dir, train_to_test_ratio=train_test_ratio)
+data.balance = False
+transformer = RandomTransformCropper(size=224)
+
+data.per_run_filters.extend([
+    transformer.apply,
+    imgutils.img_to_float,
+    fill_bg_with_black
+])
 
 if args.action == TRAIN:
+    transformer.random_transform = True
     assert_or_quit(args.resnet_dir,
                    '--resnet-dir must be specified for training a model!')
     c = Classifier(
-            data, args.resnet_dir,
-            cache_dir=args.cache_dir,
-            max_train_samples=args.max_train_samples)
-    c.cache_features()
-    c.train()
+        data, args.resnet_dir,
+        cache_dir=args.cache_dir,
+        summary_dir=args.summary_dir
+    )
+    try:
+        c.train()
+    except (KeyboardInterrupt, InterruptedError) as e:
+        logging.warning('Training interrupted, saving our current model')
     with open(args.model_path, 'wb') as f:
         pickle.dump(c, f)
-
-
 else:
+    transformer.random_transform = False
     with open(args.model_path, 'rb') as f:
         c = pickle.load(f)
     c.dataset = data
@@ -116,7 +125,7 @@ else:
 
     if args.action == CLASSIFY:
         for batch_ids, batch_predictions in classify(
-                data.files_batch_iter(batch_size=args.eval_batch_size, num_epochs=1)):
+                data.files_batch_iter(batch_size=c.batch_size, num_epochs=1)):
             for file_id, predictions in zip(batch_ids, batch_predictions):
                 # Intentionally print and don't log, so that the format is easy to
                 # expect and parse.
@@ -126,7 +135,7 @@ else:
 
     elif args.action == TEST:
         confusion = ConfusionMatrix(c.n_classes, args.k)
-        batch_iter = data.files_batch_test_iter(batch_size=args.eval_batch_size, num_epochs=1)
+        batch_iter = data.files_batch_test_iter(batch_size=c.batch_size, num_epochs=1)
         try:
             for i, (batch_ids, batch_predictions) in enumerate(classify(
                     batch_iter, keep_indices=True)):

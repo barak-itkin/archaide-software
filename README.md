@@ -63,6 +63,13 @@ here inside the root folder of the repository). If the torrent is not
 available for some reason, follow the conversion instructions on their
 documentation.
 
+### PointNet dependency
+The current architecture of the shape-based classification, is based on
+[PointNet](https://github.com/charlesq34/pointnet). Our code uses a
+modified version of PointNet, which was modified for our own needs, and
+is available at [PointNet-ArchAIDE](https://github.com/barak-itkin/pointnet-archaide).
+All we need for now, is just to clone this repository.
+
 ## Usage
 
 ### Appearance based similarity
@@ -77,11 +84,11 @@ backgrounds, before using them for training the classification.
 To do this, we first use the following tool on the folder containing the original
 data:
 
-```
+```sh
 python -m c3d.appearance2.fg_extract \
   path/to/raw/data/folder \
-  --alternate_base=path/to/extracted/data/folder \
-  --num_workers=10
+  --alternate_base path/to/extracted/data/folder \
+  --num_workers 10
 ```
 
 This will create a new folder with the foreground extracted version of the
@@ -106,7 +113,7 @@ mkdir path/to/cache
 # Train the model
 python -m c3d.appearance2 \
   path/to/model.pkl path/to/extracted/data/folder \
-  --resnet-dir=path/to/resnet-dir \
+  --resnet-dir path/to/resnet-dir \
   train
   --cache_dir path/to/cache
 ```
@@ -115,10 +122,10 @@ python -m c3d.appearance2 \
 
 Classify all images in a given folder. For each image, list the top 3 guesses:
 
-```
+```sh
 python -m c3d.appearance2 \
   path/to/model.pkl path/to/extracted/data/folder \
-  --k=3
+  --k 3
   classify
 ```
 
@@ -127,10 +134,10 @@ python -m c3d.appearance2 \
 Evaluate our training - test the model on the images that were left out for
 testing, listing top 5 guesses:
 
-```
+```sh
 python -m c3d.appearance2 \
   path/to/model.pkl path/to/extracted/data/folder \
-  --k=5
+  --k 5
   test
 ```
 
@@ -140,40 +147,88 @@ Note: The test should be carried out on the same folder with the source images.
 
 Additional arguments can be found using the `--help` flag:
 
-```
+```sh
 python -m c3d.appearance2 --help
 ```
 
 ### Shape based similarity
 
-Train the model on all images in the folder. The label of each image will be
-the name of the folder containing it:
-```
-python -m c3d.shape example.model path/to/data train
-```
-The data can be in one of two flavors:
+#### Generating the synthetic sherds
 
-1. JSON files representing c3d.datamodel.Fracture objects. In that case, the
-   file names must end with `.fracture.json`
-1. Single-channel 256x256 grayscale images, with white representing the
-   fracture and black representing the background.
+To train the shape recognition model, we first need to generate the training
+data - lots of synthetic sherd fractures. To do this, we use the following tool
+on the folder containing the profiles to train on:
 
-Note that **it is OK to interrupt the training with Ctrl+C** - in the case the
-model that'll be saved is what was trained so far. Furthermore, running the
-same command again will continue training where it has previously stopped.
-
-Classify all images in a given folder. For each image, list the top 3 guesses:
 ```
-python -m c3d.shape example.model path/to/data --k 3 classify
+python -m c3d.pipeline.fracture2 \
+  path/to/profile-svgs/data/folder \
+  path/to/sherds/data/folder \
+  2000
 ```
 
-Evaluate our training - check the accuracy of our model on the data that was
-left out for testing during the training process:
+This will create a new folder with the specified number of synthetic sherds
+generated for each profile drawing (SVG file). This is the data we'll use in the
+training process.
+
+#### Training
+
+To train the model on the synthetic sherds in the folder, run
+
 ```
-python -m c3d.shape example.model path/to/data --k 3 classify
+# Create a directory for saving intermediate training results (used to continue
+# training if it was interrupted)
+mkdir path/to/cache
+
+# Train the model
+PYTHONPATH=path/to/pointnet-archaide:$PYTHONPATH python -m c3d.shape2 \
+  path/to/model.pkl path/to/sherds/data/folder \
+  [ --label-mapping-file path/to/mapping/file.json \ ]
+  train \
+  --cache_dir path/to/cache \
+  [ --eval_set path/to/sherd-svgs/data/folder ]
 ```
 
-Additional arguments can be found using the `--help` flag:
+Note that we need to add the path to the `pointnet-archaide` repository to the
+`PYTHONPATH` environment variable. Furthermore, if we want to specify that
+multiple profiles are equivalent (for example, to specify that all subtypes of a
+specific top-level type are equivalent, for training a top-level classifier), we
+need to specify a path to a label mapping file. The label mapping is a JSON file
+with the following structure:
+
+```json
+{
+  "profile01_name": "new_name01",
+  "profile02_name": "new_name02",
+  ...
+}
 ```
-python -m c3d.shape --help
+
+For convinience, we include an example such file mapping all subtypes of
+Terra Sigillata (from the Conspectus) to their top level profiles. This file
+is `terra-sigillata-complete-top-level.json` which is provided in this
+repository. Note that we excluded subtypes that only show a partial shape
+(and not a full profile); **by excluding profiles from the label mapping file,
+we remove them from the training process.**
+
+Another argument we specified is an evaluation set - if specified, this should
+be the path to a folder containing SVGs extracted from real sherds. The SVGs
+should be organized under folders with the same names as in the training set,
+and they will be periodically used to evaluate the classifier accuracy on them,
+providing a measure of the accuracy on real data.
+
+#### Classifying
+
+To classify all sherd SVGs in a given folder, listing the top 3 guesses for
+each input, run the following command:
+
+```sh
+PYTHONPATH=path/to/pointnet-archaide:$PYTHONPATH python -m c3d.shape2 \
+  path/to/model.pkl path/to/sherds/data/folder \
+  [ --label-mapping-file path/to/mapping/file.json \ ]
+  --svg-inputs \
+  --k 3 \
+  classify
 ```
+
+This command will also print the accuracy of the classification (assuming the
+folder names match the names used during the training).

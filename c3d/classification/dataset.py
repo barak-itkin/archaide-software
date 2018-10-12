@@ -1,6 +1,7 @@
 import collections
-import numpy
+import numpy as np
 import os
+import re
 import skimage.io
 
 
@@ -8,18 +9,62 @@ AUGMENT_PREFIX = '$augment.'
 AUGMENT_SUFFIX = '$$'
 
 
-FileId = collections.namedtuple('FileId', 'label id augment')
+FileId = collections.namedtuple('FileId', 'label id augment source_label')
+FileId.unaugmented = lambda self: FileId(
+    label=self.label, id=self.id, augment=None, source_label=self.source_label
+)
 NamedSample = collections.namedtuple('NamedSample', 'name sample')
 
 
+def random_balance(inputs, input_to_label=None, max_ratio_from_min=1):
+    """
+    Given a list of inputs, randomly select from them so all classes have
+    a similar number of inputs.
+
+    Args:
+        inputs: The inputs to balance
+        input_to_label: A function mapping from input to it's label
+        max_ratio_from_min: The maximal ratio between the class with the
+        most samples and the class with the least samples.
+    """
+    n = len(inputs)
+    input_to_label = input_to_label or (lambda x: x)
+
+    source_indices = np.random.permutation(n)
+    labels = np.array([input_to_label(inputs[i])
+                       for i in source_indices])
+
+    index_in_label = np.zeros((n,))
+    batch_count = collections.Counter()
+    for i, l in enumerate(labels):
+        index_in_label[i] = batch_count[l]
+        batch_count[l] += 1
+
+    min_count = min(batch_count.values())
+    mask = index_in_label / max_ratio_from_min < min_count
+
+    return [
+        inputs[i] for i in source_indices[mask]
+    ]
+
+
 class Dataset:
-    def __init__(self, data_root, train_to_test_ratio=None):
+    def __init__(self, data_root, train_to_test_ratio=None, file_name_regex=None):
         self.train_to_test_ratio = train_to_test_ratio
         self.has_test = train_to_test_ratio is not None
         self.data_root = os.path.abspath(data_root)
         self.shuffle_seed = 0
         self.num_sherds = 1
         self.sherd_id = 0
+        self.cache = {}
+        self.do_caching = False
+        self.label_map = None
+        self.loose_label_map = False
+        self.balance = True
+        self.file_name_regex = re.compile(file_name_regex) if file_name_regex is not None else None
+
+    def enable_cache(self):
+        self.do_caching = True
 
     def shuffle(self):
         self.shuffle_seed += 1
@@ -39,7 +84,7 @@ class Dataset:
 
     def file_dir(self, file_id):
         # Override according to id_from_path / label_from_path
-        return file_id.label
+        return file_id.label if file_id.source_label is None else file_id.source_label
 
     def file_path(self, file_id):
         dirname = self.file_dir(file_id)
@@ -56,6 +101,9 @@ class Dataset:
             self.data_root, dirname, fname + augment_part
         )
 
+    def _file_name_filter(self, filename):
+        return self.file_name_regex is None or self.file_name_regex.match(filename)
+
     def file_filter(self, dirname, filename):
         return True
 
@@ -68,6 +116,8 @@ class Dataset:
             # Make the dirpath canonical so names can be extracted reliably
             dirpath.rstrip(os.path.sep)
             for filename in files:
+                if not self._file_name_filter(filename):
+                    continue
                 if AUGMENT_PREFIX in filename:
                     filename, augment = filename.split(AUGMENT_PREFIX, 1)
                     assert AUGMENT_SUFFIX in augment
@@ -83,8 +133,19 @@ class Dataset:
                 f = FileId(
                     label=self.label_from_path(dirpath, filename),
                     id=self.id_from_path(dirpath, filename),
-                    augment=augment
+                    augment=augment,
+                    source_label=None
                 )
+
+                if self.label_map:
+                    if f.label in self.label_map:
+                        # Update labels according to the mapping
+                        f = f._replace(label=self.label_map[f.label], source_label=f.label)
+                    elif self.loose_label_map:
+                        pass  # Preserve labels not in the map as is
+                    else:
+                        continue  # Skip labels not in the map
+
                 if self.file_id_filter(f) and hash(f) % self.num_sherds == self.sherd_id:
                     yield f
 
@@ -95,7 +156,7 @@ class Dataset:
 
     def file_ids_test_iter(self):
         for f in self.file_ids_iter():
-            if self.is_train_file(f):
+            if self.is_test_file(f):
                 yield f
 
     def count(self):
@@ -104,23 +165,39 @@ class Dataset:
     def prepare_file(self, file_id):
         raise NotImplementedError()
 
+    def per_run_augment(self, file_id, prepared):
+        return prepared
+
+    def prepare_or_cache(self, file_id):
+        if self.do_caching and file_id in self.cache:
+            prep = self.cache[file_id]
+        else:
+            prep = self.prepare_file(file_id)
+            if self.do_caching:
+                self.cache[file_id] = prep
+        return self.per_run_augment(file_id, prep)
+
     def files_batch_iter(self, batch_size, num_epochs, file_ids=None,
                          no_prepare=False):
         if file_ids is None:
             file_ids = self.file_ids_iter()
         file_ids = list(file_ids)
-        n = len(file_ids)
         for i in range(num_epochs):
-            numpy.random.shuffle(file_ids)
+            if self.balance:
+                batch_ids = random_balance(file_ids, lambda fid: fid.label)
+            else:
+                batch_ids = list(file_ids)
+            n = len(batch_ids)
+            np.random.shuffle(batch_ids)
             for b in range(0, n, batch_size):
                 start = b
                 end = min(n, b + batch_size)
-                ids = file_ids[start:end]
+                ids = batch_ids[start:end]
                 if no_prepare:
                     yield ids
                 else:
                     yield ids, [
-                        self.prepare_file(f_id) for f_id in ids
+                        self.prepare_or_cache(f_id) for f_id in ids
                     ]
 
     def files_iter(self, num_epochs=1, file_ids=None, no_prepare=False):
@@ -130,8 +207,9 @@ class Dataset:
 
     def is_train_file(self, file_id):
         return (not self.has_test
-                or hash((file_id.unaugmented(), self.shuffle_seed)) % self.train_to_test_ratio
-                    != 0)
+                or hash(
+                    (file_id.unaugmented(), self.shuffle_seed)
+                ) % self.train_to_test_ratio != 0)
 
     def is_test_file(self, file_id):
         return not self.is_train_file(file_id)
@@ -169,19 +247,25 @@ def make_augmented_id(file_id, augment_name):
         return FileId(file_id.label, file_id.id, augment_name)
 
 
-IMAGE_EXTENSIONS = set(['bmp', 'png', 'tiff', 'tif', 'jpg', 'jpeg'])
+IMAGE_EXTENSIONS = {'bmp', 'png', 'tiff', 'tif', 'jpg', 'jpeg'}
 
 
 class ImageDataset(Dataset):
     def __init__(self, *args, **kwargs):
         super(ImageDataset, self).__init__(*args, **kwargs)
         self.filters = []
+        self.per_run_filters = []
 
     def prepare_file(self, file_id):
         img = skimage.io.imread(self.file_path(file_id))
         for f in self.filters:
             img = f(img)
         return img
+
+    def per_run_augment(self, file_id, prepared):
+        for f in self.per_run_filters:
+            prepared = f(prepared)
+        return prepared
 
     def file_filter(self, dirpath, filename):
         return ('.' in filename

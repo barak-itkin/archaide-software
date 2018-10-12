@@ -7,6 +7,9 @@ import re
 import tensorflow as tf
 import time
 
+from c3d.classification import ConfusionMatrix
+
+
 NAME_PATTERN = re.compile(r'^[\w\-_\.]+$')
 
 
@@ -15,13 +18,19 @@ def max_enumerate(values, limit):
 
 
 class SummaryLogger:
-    def __init__(self, log_dir, name=None):
+    def __init__(self, log_dir=None, name=None, log_writer=None, graph=None):
+        if log_writer:
+            self.log_writer = log_writer
+            return
+        elif not log_dir:
+            raise ValueError('log_dir or log_writer must be provided')
+
         if name:
             if not NAME_PATTERN.match(name):
                 raise ValueError(
                     'Invalid name "%s"! (should be a valid directory)' % name)
             log_dir = os.path.join(log_dir, name)
-        self.log_writer = tf.summary.FileWriter(log_dir)
+        self.log_writer = tf.summary.FileWriter(log_dir, graph=graph)
 
     class StepLogger:
         def __init__(self, logger, step):
@@ -53,15 +62,15 @@ class SummaryLogger:
             hist.max = float(len(bucket_values) - 1)
             # We treat each value in the input vector as a single value in the
             # relevant bucket.
-            hist.num = int(np.sum(bucket_values))
+            hist.num = int(np.nansum(bucket_values))
             # To sum this, we actually need to multiply the count in each bucket
             # by the bucket value
-            hist.sum = float(sum(i * v for i, v in enumerate(bucket_values)))
+            hist.sum = float(sum(i * v for i, v in enumerate(bucket_values) if not np.isnan(v)))
             hist.sum_squares = float(
-                sum(i * i * v for i, v in enumerate(bucket_values)))
+                sum(i * i * v for i, v in enumerate(bucket_values) if not np.isnan(v)))
             for i, v in enumerate([0] + bucket_values + [0]):
                 hist.bucket_limit.append(i - 0.5)
-                hist.bucket.append(v)
+                hist.bucket.append(v if not np.isnan(v) else 0)
             pass
 
         def log_image(self, name, img):
@@ -78,12 +87,32 @@ class SummaryLogger:
                 width=img.shape[1]
             ))
 
-        def log_multi(self, log_func, name, values, limit):
+        def log_multi(self, log_func, name, values, limit, flatten=False):
+            if flatten and len(values) == 1 and limit >= 1:
+                log_func(name, values[0])
+                return
+
             for i, val in max_enumerate(values, limit):
                 log_func('%s/%d' % (name, i + 1), val)
 
-        def log_confusion(self, name, confusion, n_guesses=None):
+        def log_confusion(self, name, confusion, n_guesses=None, flatten=True):
+            if type(confusion) is np.ndarray:
+                if len(confusion.shape) == 2:
+                    size, depth = confusion.shape[-1], 1
+                    mat = np.expand_dims(confusion, axis=0)
+                elif len(confusion.shape) == 3:
+                    size, depth = confusion.shape[-1], confusion.shape[0]
+                    mat = confusion
+                confusion = ConfusionMatrix(size, depth)
+                confusion.matrix = mat
+
+            if confusion.n == 0:
+                return
+
             n_guesses = n_guesses if n_guesses else confusion.depth
+
+            self.log_scalar('%s/num-unpredicted' % name,
+                            np.sum(confusion.prediction_histogram[0] == 0))
 
             for i, layer in max_enumerate(confusion.matrix, n_guesses):
                 self.log_image('%s/confusion/%d' % (name, i + 1), layer)
@@ -93,30 +122,38 @@ class SummaryLogger:
 
             self.log_multi(self.log_flat_histogram, '%s/prediction-hist' % name,
                            confusion.prediction_histogram / confusion.n,
-                           n_guesses)
+                           n_guesses, flatten)
 
             self.log_multi(self.log_scalar, '%s/acc' % name,
-                           confusion.acc, n_guesses)
+                           confusion.acc, n_guesses, flatten)
 
-            self.log_multi(self.log_scalar, '%s/cum-acc' % name,
-                           confusion.cumulative_acc, n_guesses)
+            if confusion.depth > 1:
+                self.log_multi(self.log_scalar, '%s/cum-acc' % name,
+                               confusion.cumulative_acc, n_guesses, flatten)
 
-            self.log_multi(self.log_flat_histogram, '%s/class-acc' % name,
-                           confusion.class_acc, n_guesses)
+            self.log_multi(self.log_weights, '%s/class-acc' % name,
+                           confusion.class_acc, n_guesses, flatten)
 
-            self.log_multi(self.log_flat_histogram, '%s/cum-class-acc' % name,
-                           confusion.cumulative_class_acc, n_guesses)
+            if confusion.depth > 1:
+                self.log_multi(self.log_weights, '%s/cum-class-acc' % name,
+                               confusion.cumulative_class_acc, n_guesses, flatten)
 
         def log_weights(self, name, weights):
             weights = np.asarray(weights)
+            max_w = np.nanmax(weights)
+            if max_w == 0:
+                max_w = 1  # Avoid NaN's
             if weights.ndim == 1:
-                self.log_flat_histogram('%s/hist' % name, weights / np.max(weights))
+                self.log_flat_histogram('%s/hist' % name, weights / max_w)
             elif weights.ndim == 2:
-                self.log_image('%s/hist' % name, weights / np.max(weights))
-            self.log_scalar('%s/min' % name, np.min(weights))
-            self.log_scalar('%s/max' % name, np.max(weights))
-            self.log_scalar('%s/std' % name, np.std(weights))
-            self.log_scalar('%s/mean' % name, np.mean(weights))
+                self.log_image('%s/hist' % name, weights / max_w)
+            self.log_scalar('%s/min' % name, np.nanmin(weights))
+            self.log_scalar('%s/max' % name, np.nanmax(weights))
+            self.log_scalar('%s/std' % name, np.nanstd(weights))
+            self.log_scalar('%s/mean' % name, np.nanmean(weights))
+
+        def log_summary(self, summary):
+            self.logger.log_writer.add_summary(summary, self.step)
 
     def log_step(self, step):
         return SummaryLogger.StepLogger(self, step)
@@ -129,3 +166,11 @@ class SummaryLogger:
         event.log_message.level = level
         event.log_message.message = str(message)
         self.log_writer.add_event(event)
+
+
+class NullSummaryLogger:
+    def log_step(self, step):
+        return None
+
+    def log_event(self, *args, **kwargs):
+        pass

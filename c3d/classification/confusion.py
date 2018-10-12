@@ -1,6 +1,116 @@
 import itertools
 import numpy as np
 
+import tensorflow as tf
+
+
+def tf_float_div(a, b, *args, **kwargs):
+    return tf.div(
+        tf.cast(a, dtype=tf.float32),
+        tf.cast(b, dtype=tf.float32),
+        *args, **kwargs)
+
+
+def tf_if(cond, result, *args, **kwargs):
+    return tf.cond(cond, result, tf.no_op(), *args, **kwargs)
+
+
+def tf_assign_if(cond, ref, values):
+    return tf_if(cond, tf.assign(ref, values))
+
+
+class TFConfusion:
+    def __init__(self, size, name):
+        self.size = size
+        self.name = name
+
+        with tf.name_scope(name):
+            self.n = tf.Variable(
+                0, dtype=tf.int32,
+                trainable=False, name='n'
+            )
+            self.matrix = tf.Variable(
+                tf.zeros((size, size), dtype=tf.int32),
+                trainable=False, name='matrix'
+            )
+            self.input_histogram = tf.reduce_sum(
+                self.matrix, axis=1,
+                name='input_histogram'
+            )
+            self.output_histogram = tf.reduce_sum(
+                self.matrix, axis=0,
+                name='output_histogram'
+            )
+            self.false_positive_histogram = (
+                self.output_histogram - tf.diag_part(self.matrix)
+            )
+            self.class_acc = tf_float_div(
+                tf.diag_part(self.matrix),
+                self.input_histogram,
+                name='class_acc'
+            )
+            self.avg_acc = tf.reduce_mean(
+                tf.boolean_mask(
+                    self.class_acc,
+                    tf.logical_not(tf.is_nan(self.class_acc))
+                ),
+                name='avg_acc'
+            )
+            self.acc = tf_float_div(
+                tf.reduce_sum(tf.diag_part(self.matrix)),
+                self.n,
+                name='acc'
+            )
+
+    def make_is_not_empty_op(self, *args, **kwargs):
+        with tf.name_scope(self.name):
+            return tf.less(0, tf.reduce_sum(self.matrix), *args, **kwargs)
+
+    def make_reset_op(self, *args, **kwargs):
+        with tf.name_scope(self.name):
+            _update_n = tf.assign(self.n, 0)
+            with tf.control_dependencies([_update_n]):
+                return tf.assign(
+                    self.matrix,
+                    tf.zeros((self.size, self.size), dtype=tf.int32),
+                    *args, **kwargs
+                )
+
+    def make_assign_op(self, data, *args, **kwargs):
+        with tf.name_scope(self.name):
+            return tf.assign(
+                self.matrix,
+                data,
+                *args, **kwargs)
+
+    def make_copy_op(self, other, *args, **kwargs):
+        with tf.name_scope(self.name):
+            return tf.assign(
+                self.matrix,
+                other.matrix,
+                *args, **kwargs)
+
+    def make_update_op(self, predicted_labels, labels,  *args, **kwargs):
+        with tf.name_scope(self.name):
+            _update_indices = tf.concat(
+                [tf.reshape(labels, [-1, 1]),
+                 tf.reshape(predicted_labels, [-1, 1])],
+                axis=1,
+                name='_update_indices'
+            )
+
+            _update_n = tf.assign_add(self.n, tf.size(labels))
+
+            with tf.control_dependencies([_update_n]):
+                # Use tf.group to avoid any return value
+                return tf.group(tf.scatter_nd_add(
+                    self.matrix,
+                    _update_indices,
+                    tf.ones(tf.shape(labels), dtype=tf.int32),
+                    use_locking=True,
+                    name='update_op'
+                ))
+
 
 class ConfusionMatrix:
     """3D confusion matrix - enabling recording multiple predictions per sample.
@@ -80,7 +190,7 @@ class ConfusionMatrix:
     @property
     def class_acc(self):
         input = self.input_histogram
-        nonz_input = input + (input == 0)
+        nonz_input = input
         # Tile the 1D as rows of a matrix, with height by the depth
         deep_nonz_input = np.tile(
             nonz_input.reshape(1, self.size),

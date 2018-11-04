@@ -23,7 +23,7 @@ class ShapeContext(object):
 
     def classify_svg(self, blob):
         path = os.path.join(self.tmp_dir, 'input.svg')
-        with open(path) as f:
+        with open(path, 'wb') as f:
             f.write(blob)
         f_id = FileId(label='.', id='input.svg', augment=None, source_label=None)
         pts = self.dataset.prepare_or_cache(f_id)

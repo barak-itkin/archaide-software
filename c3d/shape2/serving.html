@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Loading...</title>
+    <script
+      src="https://code.jquery.com/jquery-3.1.1.min.js"
+      integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8="
+      crossorigin="anonymous"></script>
+    <script>
+        var cache = {};
+        function base() {
+            var result = window.location.protocol + '//' + window.location.hostname;
+            if (window.location.port) {
+                result += ':' + window.location.port;
+            }
+            return result + '/';
+        }
+        function request(path, data, type) {
+            on_waiting();
+            var data = data || {};
+            if (type == 'post') {
+                return $.ajax({
+                    url: base() + path,
+                    method: 'post',
+                    type: 'post',
+                    dataType: 'json',
+                    contentType: false,
+                    processData: false,
+                    data: data
+                });
+            } else {
+                return $.ajax({
+                    url: base() + path,
+                    type: 'get',
+                    dataType: 'json',
+                    data: data
+                });
+            }
+        }
+        function on_waiting() {
+            $('#status').text('Waiting').css('color', 'crimson');
+        }
+        function on_done() {
+            $('#status').text('Done').css('color', 'olive');
+        }
+        function initialize() {
+            // Check for the various File API support.
+            if (window.File && window.FileReader && window.FileList && window.Blob) {
+              // Great success! All the File APIs are supported.
+            } else {
+              alert('The File APIs are not fully supported in this browser.');
+            }
+            $('#files').on('change', handleFileSelect);
+        }
+        function on_classes(classes) {
+            $('#result_classes').text(
+                classes.map(
+                    pair => pair.class + ' (' + (100 * pair.score).toFixed(2) + '%)'
+                ).join(', '));
+        }
+        function on_image(name, form) {
+            var data = new FormData(form);
+            data.append('name', name);
+            request('classify_svg', data, 'post').done(function (data) {
+                on_classes(data['ranking']);
+                on_done();
+            });
+        }
+        function handleFileSelect(evt) {
+            var files = evt.target.files; // FileList object
+            if (!files || files.length == 0)
+                return;
+            on_image(files[0].name, evt.target.form);
+        }
+    </script>
+</head>
+<body onload="initialize()">
+    <div style="width: 500px">
+    <div id="status">Ready</div>
+    <hr />
+    <div id="result_classes">No input yet</div>
+    <hr />
+    <form enctype="multipart/form-data" id="file_form">
+    <input name="data" type="file" id="files" />
+    </form>
+    <output id="list"></output>
+    </div>
+</body>
+</html>

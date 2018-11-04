@@ -68,7 +68,13 @@ The current architecture of the shape-based classification, is based on
 [PointNet](https://github.com/charlesq34/pointnet). Our code uses a
 modified version of PointNet, which was modified for our own needs, and
 is available at [PointNet-ArchAIDE](https://github.com/barak-itkin/pointnet-archaide).
-All we need for now, is just to clone this repository.
+All we need for now, is just to clone this repository and then set it up
+to use revision **@`48ce752`** by doing:
+
+```
+# Clone the repository and then enter it's directory
+git checkout 48ce752
+```
 
 ## Usage
 

@@ -228,7 +228,7 @@ def compute_profile2(drawing, distance_th=0.5, has_rot_axis=True, regular_y=Fals
     for i, o in enumerate(outlines):
         outlines[i] = try_close(o, distance_th)
 
-    if len(outlines) > 1 or any(not o.is_closed for o in outlines):
+    if len(outlines) > 1:
         import ipdb
         ipdb.set_trace()
 

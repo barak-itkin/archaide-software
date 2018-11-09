@@ -10,7 +10,7 @@ from c3d.shape2.gen_pcl_dataset import SherdSVGDataset
 
 
 class ShapeContext(object):
-    def __init__(self, model_path, tmp_dir, k=3, regular_y=False):
+    def __init__(self, model_path, k=3, tmp_dir=None, regular_y=False):
         with open(model_path, 'rb') as f:
             self.model = pickle.load(f)
         self.k = int(k)

@@ -483,7 +483,7 @@ def main():
 
     be = BatchExtract(store_extracted=args.save_fg, store_mask=args.save_mask,
                       overwrite=args.overwrite, base_dir=base_dir,
-                      dst_dir=args.alternate_base)
+                      dst_dir=args.alternate_base or base_dir)
 
     if args.num_workers <= 1:
         success = list(map(be.process_file, all_paths))

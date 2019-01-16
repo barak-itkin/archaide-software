@@ -13,11 +13,10 @@ from .input import make_train_dataset
 class Classifier(c3d.classification.FeatureClassifier):
     def __init__(self, dataset, resnet_dir, summary_dir, cache_dir, tf_session=None, n_epochs=70, batch_size=128):
         super(Classifier, self).__init__(dataset, tf_session)
+        resnet_dir = os.environ.get('RESNET_DIR_OVERRIDE', resnet_dir)
         if not os.path.isdir(resnet_dir):
             raise ValueError('Invalid resnet dir %s' % resnet_dir)
         self.resnet_dir = resnet_dir
-        if not os.path.isdir(cache_dir):
-            os.makedirs(cache_dir)
         self.cache_dir = cache_dir
         self.summary_dir = summary_dir
         self.cache_path = os.path.join(self.cache_dir, 'decor_feature_cache.pickle')
@@ -147,7 +146,8 @@ class Classifier(c3d.classification.FeatureClassifier):
 
     def load_last_run(self):
         if not os.path.isdir(self.cache_dir):
-            raise ValueError('Invalid cache dir %s' % self.cache_dir)
+            os.makedirs(self.cache_dir)
+            return False
         try:
             # Attempt restoring previously interrupted training sessions
             if os.path.exists(os.path.join(self.cache_dir, 'checkpoint')):

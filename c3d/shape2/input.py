@@ -24,7 +24,7 @@ class ProfileDataset(Dataset):
 
 class ProfileFractureDataset(Dataset):
     def file_filter(self, dirname, filename):
-        return filename.endswith('2.fracture-prof2.json')
+        return filename.endswith('.fracture-prof2.json')
 
     def prepare_file(self, file_id):
         return load_json(self.file_path(file_id), Profile2)

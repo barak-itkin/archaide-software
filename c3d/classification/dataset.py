@@ -1,4 +1,5 @@
 import collections
+import itertools
 import numpy as np
 import os
 import re
@@ -177,12 +178,15 @@ class Dataset:
                 self.cache[file_id] = prep
         return self.per_run_augment(file_id, prep)
 
-    def files_batch_iter(self, batch_size, num_epochs, file_ids=None,
+    def files_batch_iter(self, batch_size, num_epochs=None, file_ids=None,
                          no_prepare=False):
         if file_ids is None:
             file_ids = self.file_ids_iter()
         file_ids = list(file_ids)
-        for i in range(num_epochs):
+        for i in (
+                range(num_epochs) if num_epochs is not None
+                else itertools.cycle([-1])
+        ):
             if self.balance:
                 batch_ids = random_balance(file_ids, lambda fid: fid.label)
             else:
@@ -228,6 +232,11 @@ class Dataset:
         return set(
             f_id.label for f_id in self.file_ids_iter()
         )
+
+    def __getstate__(self):
+        result = vars(self)
+        result['cache'] = {}
+        return result
 
 
 def augment(named_samples, augment_function):

@@ -258,12 +258,12 @@ def make_cw(outline2):
     # Check the orientation of the points using the shoelace formula
     # https://stackoverflow.com/a/1165943/748102
     # https://en.wikipedia.org/wiki/Shoelace_formula
-    pts = outline2.points
-    area = np.nansum([
-        # (  x2    -      x1      ) * (    y2    +      y1      )
-        (pts[i][0] - pts[i - 1][0]) * (pts[i][1] + pts[i - 1][1])
-        for i in range(len(pts))
-    ])
+    pts = np.asanyarray(outline2.points)
+    pts_prev = np.roll(pts, -1, axis=0)
+    area = np.nansum(
+        (pts[:, 0] - pts_prev[:, 0]) * (pts[:, 1] + pts_prev[:, 1]),
+        axis=0
+    )
     assert not np.isnan(area)  # Make sure we have valid points!
     if area > 0:
         return outline2
@@ -273,7 +273,8 @@ def make_cw(outline2):
 
 def _rotate_first(arr, first_idx):
     assert isinstance(arr, list)
-    return [arr[(i + first_idx) % len(arr)] for i in range(len(arr))]
+    assert first_idx >= 0
+    return arr[first_idx:] + arr[:first_idx]
 
 
 def make_consistent(outline2):

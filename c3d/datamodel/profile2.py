@@ -1,3 +1,5 @@
+from typing import List
+
 from .outline2 import Outline2
 from .utils import JsonSerializable
 
@@ -8,8 +10,8 @@ class Profile2(JsonSerializable):
     Additionally, profiles hold the area of the largest triangle eliminated in
     the outline simplification process."""
     def __init__(self, outlines=(), simplification_area=0):
-        self.outlines = [o.clone() for o in outlines]
-        self.simplification_area = simplification_area
+        self.outlines = [o.clone() for o in outlines]  # type: List[Outline2]
+        self.simplification_area = simplification_area  # type: float
 
     def __len__(self):
         return len(self.outlines)

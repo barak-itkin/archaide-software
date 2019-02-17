@@ -20,34 +20,53 @@ def tf_assign_if(cond, ref, values):
 
 
 class TFConfusion:
-    def __init__(self, size, name):
+    def __init__(self, size, name, depth=None, dtype=tf.int32):
+        """
+        The matrix dimensions are:
+        - First dimension - the number of the prediction.
+        - Second dimension - the true label of the input sample.
+        - Third dimension - the predicted label of the input sample.
+
+        :param size:
+        :param name:
+        """
         self.size = size
         self.name = name
+        self.depth = depth if depth is not None else self.size
+        self.dtype = dtype
 
         with tf.name_scope(name):
             self.n = tf.Variable(
-                0, dtype=tf.int32,
+                0, dtype=self.dtype,
                 trainable=False, name='n'
             )
             self.matrix = tf.Variable(
-                tf.zeros((size, size), dtype=tf.int32),
+                tf.zeros((self.depth, self.size, self.size), dtype=self.dtype),
                 trainable=False, name='matrix'
             )
+            self.matrix_diag = tf.matrix_diag_part(
+                self.matrix,
+                name='matrix_diag'
+            )
             self.input_histogram = tf.reduce_sum(
-                self.matrix, axis=1,
+                self.matrix[0], axis=1,
                 name='input_histogram'
             )
             self.output_histogram = tf.reduce_sum(
-                self.matrix, axis=0,
+                self.matrix, axis=1,
                 name='output_histogram'
             )
             self.false_positive_histogram = (
-                self.output_histogram - tf.diag_part(self.matrix)
+                self.output_histogram - self.matrix_diag
             )
             self.class_acc = tf_float_div(
-                tf.diag_part(self.matrix),
-                self.input_histogram,
+                self.matrix_diag,
+                tf.expand_dims(self.input_histogram, axis=0),
                 name='class_acc'
+            )
+            self.cum_class_acc = tf.cumsum(
+                self.class_acc, axis=0,
+                name='cum_class_acc',
             )
             self.avg_acc = tf.reduce_mean(
                 tf.boolean_mask(
@@ -57,7 +76,7 @@ class TFConfusion:
                 name='avg_acc'
             )
             self.acc = tf_float_div(
-                tf.reduce_sum(tf.diag_part(self.matrix)),
+                tf.reduce_sum(self.matrix_diag),
                 self.n,
                 name='acc'
             )
@@ -71,8 +90,7 @@ class TFConfusion:
             _update_n = tf.assign(self.n, 0)
             with tf.control_dependencies([_update_n]):
                 return tf.assign(
-                    self.matrix,
-                    tf.zeros((self.size, self.size), dtype=tf.int32),
+                    self.matrix, tf.zeros_like(self.matrix),
                     *args, **kwargs
                 )
 
@@ -90,23 +108,31 @@ class TFConfusion:
                 other.matrix,
                 *args, **kwargs)
 
-    def make_update_op(self, predicted_labels, labels,  *args, **kwargs):
-        with tf.name_scope(self.name):
-            _update_indices = tf.concat(
-                [tf.reshape(labels, [-1, 1]),
-                 tf.reshape(predicted_labels, [-1, 1])],
-                axis=1,
-                name='_update_indices'
+    def make_update_op(self, predicted_labels, labels):
+        with tf.name_scope(self.name), tf.name_scope('update_op'):
+            flat_labels = tf.reshape(labels, (-1, 1))
+            flat_predictions = tf.reshape(predicted_labels, (-1, self.depth))
+            n = tf.shape(flat_labels)[0]
+
+            # We are going to update n X depth elements
+            indices = tf.stack(
+                (tf.tile(tf.reshape(tf.range(self.depth, dtype=self.dtype),
+                                    (1, self.depth)),
+                         (n, 1)),
+                 tf.tile(flat_labels, (1, self.depth)),
+                 flat_predictions
+                 ),
+                axis=-1
             )
 
-            _update_n = tf.assign_add(self.n, tf.size(labels))
+            _update_n = tf.assign_add(self.n, tf.cast(n, dtype=self.dtype))
 
             with tf.control_dependencies([_update_n]):
                 # Use tf.group to avoid any return value
                 return tf.group(tf.scatter_nd_add(
                     self.matrix,
-                    _update_indices,
-                    tf.ones(tf.shape(labels), dtype=tf.int32),
+                    indices,
+                    tf.ones((n, self.depth), dtype=self.dtype),
                     use_locking=True,
                     name='update_op'
                 ))

@@ -1,12 +1,13 @@
 import tensorflow as tf
 
-from c3d.classification import ConfusionMatrix, TFConfusion
+from c3d.classification import TFConfusion
 
 
 class SmartLoss:
     def __init__(self, n_classes, logits, labels,
                  gamma=0.8, alpha_input=2, alpha_output=5, use_fp=False, fake=False, normalize=True,
-                 beta=0, reducer=tf.reduce_mean, out_always=False, name='smartloss'):
+                 reducer=tf.reduce_mean, out_always=False, name='smartloss', hit_k=1, input_k=1, output_k=1,
+                 use_in=True, use_out=True, out_shift=1, focal_loss=False, focal_gamma=2):
         with tf.name_scope(name):
             self.n_classes = n_classes
             self.gamma = gamma if not fake else 1
@@ -17,24 +18,27 @@ class SmartLoss:
             self.out_always = out_always
             self.name = name
             self.logits = logits
-            self.predicted_labels = tf.arg_max(logits, 1)
-            self.confusion = TFConfusion(self.n_classes, 'confusion')
-            self.old_confusion = TFConfusion(self.n_classes, 'old_confusion')
-            self.normalize = normalize
-            self.beta = beta
+            self.labels = labels
+            self.hit_k = hit_k
+            self.input_k = input_k
+            self.output_k = output_k
+            self.use_in = use_in if not fake else False
+            self.use_out = use_out if not fake else False
+            self.out_shift = out_shift
+            self.focal_loss = focal_loss
+            self.focal_gamma = focal_gamma
 
-            if len(labels.shape) == 1:
-                self.labels = labels
-                self.labels_one_hot = tf.one_hot(self.labels, self.n_classes)
-            elif len(labels.shape) == 2 and labels.shape[-1] == self.n_classes:
-                self.labels_one_hot = labels
-                self.labels = tf.arg_max(labels, 1)
-            else:
-                raise ValueError('Bad shape for labels ' + labels.shape)
+            _, self.top_predicted_labels = tf.nn.top_k(logits, sorted=True, k=self.n_classes)
+            self.normalize = normalize
+
+            assert len(self.labels.shape) + 1 == len(self.logits.shape)
 
             # Avoid int32 vs. int64 issues
-            if self.predicted_labels.dtype != self.labels.dtype:
-                self.predicted_labels = tf.cast(self.predicted_labels, self.labels.dtype)
+            if self.top_predicted_labels.dtype != self.labels.dtype:
+                self.top_predicted_labels = tf.cast(self.top_predicted_labels, self.labels.dtype)
+            self.predicted_labels = self.top_predicted_labels[..., 0]
+            self.confusion = TFConfusion(self.n_classes, 'confusion', depth=self.n_classes,
+                                         dtype=self.labels.dtype)
 
             self.input_label_weight_t = tf.Variable(
                 tf.ones((n_classes,), dtype=tf.float32),
@@ -47,50 +51,90 @@ class SmartLoss:
 
             self.standalone_update_op = self.make_update_op()
 
-            self.confusion_placeholder = tf.placeholder(
-                self.confusion.matrix.dtype, self.confusion.matrix.shape,
-                'confusion_placeholder'
-            )
-            self.set_confusion_op = self.confusion.make_assign_op(
-                self.confusion_placeholder
-            )
-
     def make_update_op(self):
-        update_input_weight_op = self.input_label_weight_t.assign(
-            self._moving_average(
-                self.input_label_weight_t,
-                self.new_input_weight())
-        )
-        update_output_weight_op = self.output_label_weight_t.assign(
-            self._moving_average(
-                self.output_label_weight_t,
-                self.new_output_weight())
-        )
-        save_old_conf_op = self.old_confusion.make_copy_op(self.confusion)
+        update_ops = []
+        if self.use_in:
+            update_input_weight_op = self.input_label_weight_t.assign(
+                self._moving_average(
+                    self.input_label_weight_t,
+                    self.new_input_weight())
+            )
+            update_ops.append(update_input_weight_op)
 
-        # Reset the confusion only after updating the weights and saving a copy
-        pre_ops = [update_input_weight_op, update_output_weight_op, save_old_conf_op]
-        with tf.control_dependencies(pre_ops):
+        if self.use_out:
+            update_output_weight_op = self.output_label_weight_t.assign(
+                self._moving_average(
+                    self.output_label_weight_t,
+                    self.new_output_weight())
+            )
+            update_ops.append(update_output_weight_op)
+
+        # Reset the confusion only after updating the weights
+        with tf.control_dependencies(update_ops):
             reset_conf_op = self.confusion.make_reset_op()
 
         # And return a group making sure all of this ran
-        return tf.group(reset_conf_op, *pre_ops)
+        return tf.group(reset_conf_op, *update_ops)
 
     def make_loss(self):
-        input_weight = tf.gather(self.input_label_weight_t, self.labels)
-        output_weight = tf.gather(self.output_label_weight_t, self.predicted_labels)
+        with tf.control_dependencies([
+            tf.assert_equal(tf.shape(self.labels), tf.shape(self.predicted_labels))
+        ]):
+            if self.use_in:
+                input_weight = tf.gather(self.input_label_weight_t,
+                                         indices=self.labels)
+            else:
+                input_weight = tf.ones_like(
+                    self.labels, dtype=self.input_label_weight_t.dtype
+                )
 
-        hit = tf.cast(tf.equal(self.predicted_labels, self.labels), 'float')
-        if self.out_always:
-            loss_weight = input_weight * output_weight
-        else:
-            loss_weight = input_weight * (1 + (1 - hit) * output_weight)
+            if self.use_out:
+                output_weight = tf.gather(self.output_label_weight_t,
+                                          indices=self.predicted_labels)
+            else:
+                output_weight = tf.ones_like(
+                    self.labels, dtype=self.output_label_weight_t.dtype
+                )
 
-        return self.reducer(
-            loss_weight * tf.nn.softmax_cross_entropy_with_logits(
-                labels=self.labels_one_hot,
-                logits=self.logits)
-        )
+        with tf.control_dependencies([
+            tf.assert_equal(tf.shape(self.labels),
+                            tf.shape(self.top_predicted_labels)[:-1])
+        ]):
+            hit = tf.cast(
+                tf.reduce_any(
+                    tf.equal(self.top_predicted_labels[..., :self.hit_k],
+                             tf.expand_dims(self.labels, axis=-1)),
+                    axis=-1
+                ),
+                'float'
+            )
+
+        if self.use_out and not self.out_always:
+            output_weight = (self.out_shift + (1 - hit) * output_weight)
+            output_weight = self._mean1(output_weight)
+
+        loss_weight = input_weight * output_weight
+
+        if self.focal_loss:
+            if len(self.labels.shape) != 1:
+                raise NotImplementedError('Focal loss not implemented with multi-dimensional labels')
+
+            with tf.name_scope('focal_loss'):
+                probs = tf.nn.softmax(self.logits, axis=-1)
+                loss_weight *= tf.pow(
+                    1 - tf.gather(probs, indices=self.labels, axis=-1),
+                    self.focal_gamma
+                )
+
+        with tf.control_dependencies([
+            tf.assert_equal(tf.shape(self.labels), tf.shape(loss_weight))
+        ]):
+            return self.reducer(
+                loss_weight * tf.nn.sparse_softmax_cross_entropy_with_logits(
+                    labels=self.labels,
+                    logits=self.logits
+                )
+            )
 
     def _moving_average(self, start, end):
         # Where the 'end' values has nan values, we don't want to update. To
@@ -113,9 +157,8 @@ class SmartLoss:
         ])
 
     def new_input_weight(self):
-        class_acc = self.confusion.class_acc
+        class_acc = self.confusion.cum_class_acc[self.input_k]
         return self._mean1(tf.cast((
-            tf.exp(self.beta * tf.cast(self.confusion.input_histogram, tf.float32)) *
             tf.exp(- self.alpha_input * class_acc)
         ), tf.float32))
 
@@ -135,7 +178,7 @@ class SmartLoss:
 
     def new_output_weight(self):
         def false_positives():
-            falses = self.confusion.false_positive_histogram
+            falses = self.confusion.false_positive_histogram[0]
             sum_falses = tf.reduce_sum(falses)
             return tf.cond(
                 sum_falses > 0,
@@ -145,34 +188,23 @@ class SmartLoss:
             )
 
         def class_acc():
-            return self.confusion.class_acc
+            return self.confusion.cum_class_acc[self.output_k]
 
         fp_or_acc = tf.cond(tf.constant(self.use_fp), false_positives, class_acc)
         return self._mean1(tf.cast(tf.exp(+ self.alpha_output * fp_or_acc), tf.float32))
 
     def log_reports(self, session, log_step=None):
         if log_step:
-            input_w, output_w, old_conf = session.run([
+            input_w, output_w = session.run([
                 self.input_label_weight_t,
                 self.output_label_weight_t,
-                self.old_confusion.matrix,
             ])
             log_step.log_weights('%s/input_weights' % self.name, input_w)
             log_step.log_weights('%s/output_weights' % self.name, output_w)
-            log_step.log_confusion('%s/confusion' % self.name, old_conf)
 
-    def make_confusion_record_op(self, *args, **kwargs):
-        return self.confusion.make_update_op(
-            self.predicted_labels, self.labels, *args, **kwargs
-        )
+    def make_confusion_record_op(self):
+        return self.confusion.make_update_op(self.top_predicted_labels, self.labels)
 
     def update_weights(self, session, log_step=None):
         session.run(self.standalone_update_op)
         self.log_reports(session, log_step)
-
-    def set_confusion(self, session, data):
-        if type(data) is ConfusionMatrix:
-            data = data.matrix[0]
-        session.run(self.set_confusion_op, feed_dict={
-            self.confusion_placeholder: data
-        })

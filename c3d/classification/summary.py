@@ -1,6 +1,5 @@
 # Partially based on https://gist.github.com/gyglim/1f8dfb1b5c82627ae3efcfbbadb9f514
 import io
-import matplotlib.pyplot as plt
 import numpy as np
 import os
 import re
@@ -17,6 +16,22 @@ def max_enumerate(values, limit):
     return zip(range(limit), values)
 
 
+def tensor_summary(tensor, name):
+    if ':' in name:
+        parts = name.split(':')
+        assert len(parts) == 2 and parts[1] == '0'
+        name = parts[0]
+    with tf.name_scope(name):
+        mean = tf.reduce_mean(tensor)
+        tf.summary.scalar('mean', mean)
+        with tf.name_scope('stddev'):
+            stddev = tf.sqrt(tf.reduce_mean(tf.square(tensor - mean)))
+        tf.summary.scalar('has_nan', tf.cast(tf.reduce_any(tf.is_nan(tensor)), tf.int32))
+        tf.summary.scalar('stddev', stddev)
+        tf.summary.scalar('max', tf.reduce_max(tensor))
+        tf.summary.scalar('min', tf.reduce_min(tensor))
+
+
 class SummaryLogger:
     def __init__(self, log_dir=None, name=None, log_writer=None, graph=None):
         if log_writer:
@@ -31,12 +46,18 @@ class SummaryLogger:
                     'Invalid name "%s"! (should be a valid directory)' % name)
             log_dir = os.path.join(log_dir, name)
         self.log_writer = tf.summary.FileWriter(log_dir, graph=graph)
+        self.acc_fp = open(
+            os.path.join(log_dir,
+                         ('%s-' % name if name else '') + 'confusion.pkl'),
+            'ab'
+        )
 
     class StepLogger:
         def __init__(self, logger, step):
-            self.logger = logger
+            self.logger = logger  # type: SummaryLogger
             self.step = step
             self.summary = None
+            self.confusions = {}
 
         def __enter__(self):
             self.summary = tf.Summary()
@@ -45,6 +66,7 @@ class SummaryLogger:
         def __exit__(self, exc_type, exc_val, exc_tb):
             self.logger.log_writer.add_summary(self.summary, self.step)
             self.logger.log_writer.flush()
+            # pickle.dump((self.step, self.confusions), self.logger.acc_fp)
             self.summary = None
 
         def log_scalar(self, name, value):
@@ -76,6 +98,7 @@ class SummaryLogger:
         def log_image(self, name, img):
             # Use BytesIO and not StringIO for saving an image in-memory. See
             # http://matplotlib.1069221.n5.nabble.com/savefig-and-StringIO-error-on-Python3-td44241.html
+            import matplotlib.pyplot as plt
             img_str = io.BytesIO()
             plt.imsave(img_str, img, format='png')
 
@@ -103,6 +126,8 @@ class SummaryLogger:
                 elif len(confusion.shape) == 3:
                     size, depth = confusion.shape[-1], confusion.shape[0]
                     mat = confusion
+                else:
+                    raise AssertionError()
                 confusion = ConfusionMatrix(size, depth)
                 confusion.matrix = mat
 
@@ -138,6 +163,8 @@ class SummaryLogger:
                 self.log_multi(self.log_weights, '%s/cum-class-acc' % name,
                                confusion.cumulative_class_acc, n_guesses, flatten)
 
+            self.confusions[name] = confusion.matrix.tolist()
+
         def log_weights(self, name, weights):
             weights = np.asarray(weights)
             max_w = np.nanmax(weights)
@@ -166,6 +193,10 @@ class SummaryLogger:
         event.log_message.level = level
         event.log_message.message = str(message)
         self.log_writer.add_event(event)
+
+    def __del__(self):
+        self.log_writer.close()
+        self.acc_fp.close()
 
 
 class NullSummaryLogger:

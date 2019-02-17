@@ -19,6 +19,9 @@ class ShapeContext(object):
             data_root=tmp_dir,  # Not used in practice
             regular_y=regular_y,
         )
+        self.dataset.eval_mode = True
+        self.dataset.balance = False
+        self.dataset.data_spec = self.model.config.data_spec
         self.dataset.do_caching = False
 
     def classify_svg(self, blob):

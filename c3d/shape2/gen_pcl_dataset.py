@@ -1,106 +1,52 @@
-import argparse
 import c3d.algorithm.fracture
 import c3d.algorithm.drawings
 import c3d.algorithm.sample as sample_m
 import c3d.classification.dataset
 import c3d.datamodel
 import c3d.shape2.input
-import h5py
 import numpy as np
-import os
 
 from c3d.datamodel import Profile2, Outline2
+from c3d.shape2 import outlinenet
 
 
-# Current number of "values" per point
-NUM_POINT_DIMENSIONS = 8
-
-# Scale all points from mm to meters
-GLOBAL_SCALE = 0.01
-
-# Compute angles by looking 1mm to each side
-ANGLE_SAMPLE_DIST = 2
-
-# Add a random scale augmentation
-SCALE_CENTER = 1.2
-SCALE_STD = 0.8
-
-# Add a random horizontal scale augmentation, simulating fractures that are not
-# exactly parallel to the image plane.
-HSCALE_CENTER = 1
-HSCALE_STD = 0.2
-
-# Add a random rotation, as fractures aren't always exactly straightened up.
-ROT_CENTER = 0
-ROT_STD = np.deg2rad(10)
-
-
-def random_scale():
-    while True:
-        val = np.random.normal(SCALE_CENTER, SCALE_STD)
-        if val > 0.8:
-            return val
-
-
-def scale_matrix(s=None):
-    s = random_scale() if s is None else s
-    return np.asarray([
-        [s, 0],
-        [0, s],
-    ])
-
-
-def random_hscale():
-    return np.random.normal(HSCALE_CENTER, HSCALE_STD)
-
-
-def hscale_matrix(hs=None):
-    hs = random_hscale() if hs is None else hs
-    return np.asarray([
-        [hs, 0],
-        [0,  1],
-    ])
-
-
-def random_rot_in_rad():
-    return np.random.normal(ROT_CENTER, ROT_STD)
-
-
-def rot_matrix(r=None):
-    r = random_rot_in_rad() if r is None else r
-    sin, cos = np.sin(r), np.cos(r)
-    return np.asarray([
-        [+cos, -sin],
-        [+sin, +cos],
-    ])
-
-
-def random_transform_matrix():
-    return np.matmul(
-        np.matmul(scale_matrix(), hscale_matrix()),
-        rot_matrix()
-    )
+BLACKLIST = [
+    ('CF_22', 'GR007_001_profile.svg'),
+    ('CF_20_2', 'MGB003_004_profile.svg'),
+    ('CF_26_1', 'PG001_001_profile.svg'),
+    ('CF_11', 'GR039_002_profile.svg'),
+]
 
 
 class FractureSamplingInputMixin(c3d.classification.dataset.Dataset):
     def __init__(self, *args, **kwargs):
         super(FractureSamplingInputMixin, self).__init__(*args, **kwargs)
-        self.class_subset = None
-        self.num_points = 64
-        self.sample_points_by_dist = 3 * GLOBAL_SCALE
-        self.max_noise_size = 2 * GLOBAL_SCALE
-        self.angle_sampling_distance = ANGLE_SAMPLE_DIST
-        self.noise_size = None
-        self.do_noise = False
+        self.data_spec = None  # type: outlinenet.DataSpec
+        self.eval_mode = None  # type: bool
+        self.insert_invalid_points = False
+
+    def set_config(self, config, eval_mode):
+        self.data_spec = config
+        self.eval_mode = eval_mode
 
     @property
-    def has_class_subset(self):
-        return self.class_subset is not None and len(self.class_subset) > 0
+    def num_points(self):
+        if self.eval_mode and self.data_spec.eval_upsample:
+            return self.data_spec.eval_max_num_points
+        else:
+            return self.data_spec.train_max_num_points
+
+    @property
+    def sample_points_by_dist(self):
+        if self.eval_mode and self.data_spec.eval_upsample:
+            return self.data_spec.scaled_min_eval_sample_point_dist
+        else:
+            return self.data_spec.scaled_min_train_sample_point_dist
 
     def file_id_filter(self, file_id):
-        if self.has_class_subset and file_id.label not in self.class_subset:
-            print('Drop subset')
+        if (file_id.label, file_id.id) in BLACKLIST or (file_id.source_label, file_id.id) in BLACKLIST:
             return False
+
         if file_id.label != 'CF_15':
             return True
         # TODO(Hack)
@@ -111,119 +57,163 @@ class FractureSamplingInputMixin(c3d.classification.dataset.Dataset):
         if all(v == Outline2.NEITHER for v in profile2.outlines[0].inside_map):
             print('Dropping %s on invalid inside map' % (str(file_id)))
             return False
-
         return True
 
-    def scale_input_outline(self, o):
-        return Outline2(
-            points=np.asanyarray(o.points) * GLOBAL_SCALE,
-            inside_map=o.inside_map
-        )
+    def scale_input_outline(self, o, sx, sy):
+        pts = np.asanyarray(o.points)
+        pts[:, 0] *= sx
+        pts[:, 1] *= sy
+        return Outline2(points=pts, inside_map=o.inside_map)
 
     def normalize_points(self, pts):
         pts = np.asanyarray(pts)
         assert pts.ndim == 2 and pts.shape[1] == 2
-        center = np.mean(pts, axis=0)
-        return pts - np.tile(np.expand_dims(center, axis=0), (len(pts), 1))
+        center = np.nanmean(pts, axis=0)
+        result = pts - center
+        if self.data_spec.force_unit_radius:
+            result /= np.max(np.linalg.norm(result, axis=1))
+        return result
 
-    def noise_points(self, pts):
-        if not self.do_noise:
-            return pts
-        pts = np.asanyarray(pts)
-        assert pts.ndim == 2 and pts.shape[1] == 2
-        if self.noise_size is None:
-            part_length = c3d.algorithm.sample.outline_length(pts) / (len(pts) - 1)
-            # noise_size = part_length / 2
-            noise_size = max(part_length, self.max_noise_size)
+    def _pad_extra_point_values(self, point_vals):
+        if len(point_vals) < self.num_points:
+            n = len(point_vals)
+            new_shape = list(point_vals.shape)
+            new_shape[0] = self.num_points
+            result = np.zeros(new_shape, dtype=point_vals.dtype)
+            result[:n] = point_vals
+            return result
         else:
-            noise_size = self.noise_size
-        noise = np.random.uniform(low=-1, high=+1, size=pts.shape) / 2 * noise_size
-        return pts + noise
+            return point_vals
 
-    def noise_angles(self, angles):
-        if not self.do_noise:
-            return angles
-        angles = np.asanyarray(angles)
-        assert angles.ndim == 1
-        noise_size = 0.1 * 2 * np.pi
-        noise = np.random.uniform(low=-1, high=+1, size=angles.shape) / 2 * noise_size
-        return angles + noise
+    def _pad_extra_map_values(self, map_vals):
+        n = len(map_vals)
+        if n < self.num_points:
+            result_map = np.full((self.num_points,), Outline2.NEITHER)
+            result_map[:n] = map_vals
+            return result_map
+        else:
+            return map_vals
 
-    def augment_transform_points(self, pts):
-        if not self.do_noise:
-            return pts
-        pts = np.asanyarray(pts)
-        assert pts.ndim == 2 and pts.shape[1] == 2
-        return np.matmul(
-            random_transform_matrix(), pts.T
-        ).T
+    def _insert_invalid_points(self, points, inside_map, pad_size=1):
+        n_points = len(points)
+        pair_distances = sample_m.pair_distances(points)
+        # Find which segments are actually skipping along the outline
+        skip_segments = pair_distances > 2 * self.sample_points_by_dist
+        # Insert an invalid point in the middle
+        if np.any(skip_segments):
+            skip_count = np.concatenate(([0], np.cumsum(skip_segments))) * pad_size
+            new_pts = np.zeros((n_points + skip_count[-1], 2))
+            new_map = np.full((n_points + skip_count[-1],), Outline2.NEITHER, dtype=np.int32)
+            dst_indices = np.arange(n_points) + skip_count
+            new_pts[dst_indices] = points
+            new_map[dst_indices] = inside_map
 
-    def add_side_information_and_angle(self, pts, inside_map, angles):
-        pts = np.asanyarray(pts)
-        assert pts.ndim == 2 and pts.shape[1] == 2
-        inside_mask = [v == Outline2.INSIDE for v in inside_map]
-        outside_mask = [v == Outline2.OUTSIDE for v in inside_map]
+            points = new_pts
+            inside_map = new_map
 
-        result = np.zeros((len(pts), 4))
-        result[inside_mask, 0:2] = pts[inside_mask]
-        result[outside_mask, 2:4] = pts[outside_mask]
+            assert len(points) <= self.num_points
+        return points, inside_map
 
-        result_angles = np.zeros((len(pts), 4))
-        angles_v = 2 * self.max_noise_size / np.pi * np.vstack(
-            (np.sin(angles), np.cos(angles))
-        ).T
-        result_angles[inside_mask, 0:2] = angles_v[inside_mask]
-        result_angles[outside_mask, 2:4] = angles_v[outside_mask]
+    def random_normal(self, mean, std, min_val):
+        while True:
+            s = np.random.normal(loc=mean, scale=std)
+            if s >= min_val:
+                return s
 
-        return np.concatenate((result, result_angles), axis=1)
+    def random_scale(self):
+        return self.random_normal(
+            mean=self.data_spec.scale_center,
+            std=self.data_spec.scale_std,
+            min_val=self.data_spec.scale_min
+        )
+
+    def random_hscale(self):
+        return self.random_normal(
+            mean=self.data_spec.hscale_center,
+            std=self.data_spec.hscale_std,
+            min_val=self.data_spec.hscale_min
+        )
 
     def per_run_augment(self, file_id, prepared):
-        points, inside_map, angles = prepared
-        pts = self.noise_points(points)
-        angles = np.abs(angles)
-        angles = self.noise_angles(angles)
-        pts = self.augment_transform_points(pts)
-        pts = self.add_side_information_and_angle(pts, inside_map, angles)
-        assert pts.shape[1] == NUM_POINT_DIMENSIONS
-        return pts
+        outline2 = prepared
+
+        # To get the right number of points, we want to do scaling augmentation
+        # before the sampling. However, this process is slow (running on the CPU
+        # without parallelization) and runs on thousands of points.
+
+        # Instead, we approximate the new outline length after the scaling,
+        # sample the original outline in the scaled resolution, and then only
+        # scale the sampled points.
+
+        # This "cheap" heuristic makes the entire pipeline run almost 3x faster
+        # as most outlines get sampled for dozens of points, which is
+        # significantly less than the thousands of the original outline.
+
+        augment_scale = not self.eval_mode and self.data_spec.augment_train
+        if augment_scale:
+            scale = self.random_scale()
+            hscale = self.random_hscale()
+            sy = scale
+            sx = hscale * scale
+            mix_scale = scale * ((1 + hscale) / 2)  # Heuristic
+        else:
+            mix_scale = 1
+
+        length = sample_m.get_outline2_length(outline2, skip_invalid_segs=True) * mix_scale
+
+        if not self.data_spec.sample_by_resolution:
+            n_points = self.num_points
+        else:
+            n_points = max(3, int(length // self.sample_points_by_dist))
+            # assert n_points <= self.num_points * 1.5
+            n_points = min(n_points, self.num_points)
+
+        fractional_distances = sample_m.uniform_fractional_distances(
+            n_points, jitter_size=(0 if self.eval_mode else 0.5)
+        )
+        # Sort, just to make sure nothing went wrong in the process
+        fractional_distances.sort()
+
+        points, inside_map = sample_m.sample_outline2_at_distances(
+            fractional_distances=fractional_distances,
+            outline=outline2,
+            distances_sorted=True,
+            skip_invalid_segs=True
+        )
+
+        # Normalize right before repeating the last point, to make sure we have
+        # the correct center.
+        points = self.normalize_points(points)
+
+        if augment_scale:
+            points[:, 0] *= sx
+            points[:, 1] *= sy
+
+        if self.insert_invalid_points:
+            points, inside_map = self._insert_invalid_points(points, inside_map, pad_size=1)
+
+        n_points = len(points)
+        if n_points < self.num_points:
+            points = self._pad_extra_point_values(points)
+            inside_map = self._pad_extra_map_values(inside_map)
+
+        return points, inside_map, n_points
 
     def prepare_file(self, file_id):
         profile2 = super(FractureSamplingInputMixin, self).prepare_file(file_id)
         try:
             assert isinstance(profile2, Profile2)
             assert len(profile2.outlines) == 1
-            outline2 = self.scale_input_outline(profile2.outlines[0])
-            length = sample_m.get_outline2_length(outline2)
-            if self.do_noise:
-                # Sample roughly every 2mm
-                n_points = min(self.num_points, int(length // self.sample_points_by_dist))
-                fractional_distances = np.zeros(self.num_points)
-                fractional_distances[:n_points] = np.random.uniform(low=0, high=1, size=(n_points,))
-                # Repeat the last point as needed
-                fractional_distances[n_points:] = fractional_distances[n_points - 1]
-            else:
-                fractional_distances = sample_m.uniform_fractional_distances(self.num_points)
-                # IMPORTANT: This was a uniform sampling. Without transformation on the sherds,
-                # this creates an overfit in the angle computation and perhaps more things.
-                # fractional_distances = np.random.uniform(n_points)
-            fractional_distances.sort()
-            distances = fractional_distances * length
-            points, inside_map = sample_m.sample_outline2_at_distances(
-                fractional_distances=fractional_distances,
-                outline=outline2,
-                distances_sorted=True,
-                skip_invalid_segs=True
+            outline2 = self.scale_input_outline(
+                profile2.outlines[0],
+                sx=self.data_spec.global_scale,
+                sy=self.data_spec.global_scale,
             )
-            angles = sample_m.sample_outline2_angles_at_distances(
-                outline=outline2,
-                distances=distances,
-                sample_dist=self.angle_sampling_distance,
-                distances_sorted=True,
-                skip_invalid_segs=True
-            )
-            assert Outline2.NEITHER not in inside_map
-            points = self.normalize_points(points)
-            return points, inside_map, angles
+            # IMPORTANT: If we want to get angles consistent, all outlines must be
+            # oriented in the same direction!
+            outline2 = c3d.algorithm.drawings.make_cw(outline2)
+            outline2 = c3d.algorithm.drawings.make_consistent(outline2)
+            return outline2
         except:
             print('Error preparing %s' % str(file_id))
             raise
@@ -239,67 +229,3 @@ class SherdDataset(FractureSamplingInputMixin, c3d.shape2.input.ProfileFractureD
 
 class SherdSVGDataset(FractureSamplingInputMixin, c3d.shape2.input.SherdSVGDataset):
     pass
-
-
-INPUT_MAPPING = {
-    'profile': ProfileDataset,
-    'sherd': SherdDataset,
-    'sherd_svg': SherdSVGDataset,
-}
-
-
-def make_parser():
-    parser = argparse.ArgumentParser('Generate point cloud datasets')
-    parser.add_argument('dest_path', type=str,
-                        help='Path to create the .h5 dataset')
-    parser.add_argument('data_root', type=str,
-                        help='The folder containing the data')
-    parser.add_argument('split', choices=['all', 'train', 'test'],
-                        help='Which files to generate')
-    parser.add_argument('num_points', type=int, default=64,
-                        help='Number of points to generate from each file')
-    parser.add_argument('--add_noise', default=False, action='store_true',
-                        help='Add noise to sampled points')
-    parser.add_argument('--input_type', default='sherd', choices=INPUT_MAPPING.keys(),
-                        help='Add noise to sampled points')
-    return parser
-
-
-def main(argv=None):
-    args = make_parser().parse_args(argv)
-    dataset = INPUT_MAPPING[args.input_type](data_root=args.data_root)
-    dest = os.path.abspath(args.dest_path)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-
-    dataset.do_noise = args.add_noise
-    dataset.num_points = args.num_points
-
-    if args.split == 'all':
-        source = dataset.file_ids_iter()
-    elif args.split == 'train':
-        source = dataset.file_ids_train_iter()
-    elif args.split == 'test':
-        source = dataset.file_ids_test_iter()
-    else:
-        raise AssertionError()
-
-    result = []
-    labels = []
-    for f_id in source:
-        result.append(dataset.prepare_file(f_id))
-        labels.append(f_id.label)
-
-    all_labels = list(set(labels))
-    label_to_index = dict((v,i) for i,v in enumerate(all_labels))
-
-    result = np.asarray(result)
-    label_indices = np.asarray([label_to_index[l] for l in labels])
-    all_labels = np.asarray(all_labels, dtype='S')
-    with h5py.File(dest, 'w') as f:
-        f.create_dataset('data', data=result)
-        f.create_dataset('labels', data=label_indices)
-        f.create_dataset('index_to_label', data=all_labels)
-
-
-if __name__ == '__main__':
-    main()

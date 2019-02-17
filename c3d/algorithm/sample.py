@@ -206,8 +206,18 @@ def sample_outline2_angles_at_distances(outline, distances, sample_dist,
     )
 
 
-def uniform_fractional_distances(count):
+def uniform_fractional_distances(count, jitter_size=0):
     """
     Fractional distances for uniformly sampling `count` points over a polyline.
     """
-    return np.arange(count) / (count - 1.0)
+    if jitter_size <= 0:
+        return np.arange(count) / (count - 1.0)
+    else:
+        vals = np.arange(count) / count
+        # Random jitter forward and back, not more than one "segment" to
+        # maintain relative uniformity.
+        vals += jitter_size * np.random.uniform(low=-1, high=1, size=vals.shape) / (2 * count)
+        # Random shift to the start position
+        vals += np.random.uniform(low=0, high=1)
+        # Cycle all values that passed
+        return vals % 1.

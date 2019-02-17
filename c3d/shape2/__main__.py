@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.use("Agg")
+
 import argparse
 import json
 import logging
@@ -8,8 +11,10 @@ import sys
 
 from IPython import embed
 from c3d.classification import ConfusionMatrix
-from .model import Classifier
-from .gen_pcl_dataset import SherdSVGDataset, SherdDataset, NUM_POINT_DIMENSIONS
+import c3d.util.git
+from c3d.shape2.outlinenet import OutlineNetConfig
+from . import model
+from .gen_pcl_dataset import SherdSVGDataset, SherdDataset
 
 FORMAT = '%(asctime)-15s %(message)s'
 logging.basicConfig(stream=sys.stdout, format=FORMAT, level=logging.DEBUG)
@@ -35,7 +40,7 @@ def make_parser():
                         '(and not fracture JSON files)')
     parser.add_argument('--disable-tensorflow-logs', default=False,
                         action='store_true', help='Hide logging by TensorFlow')
-    parser.add_argument('--k', type=int, default=1, required=False,
+    parser.add_argument('--k', type=int, default=10, required=False,
                         help='Number of best classes to predict')
     parser.add_argument('--train-to-test-ratio', type=int, default=6,
                         required=False,
@@ -50,6 +55,12 @@ def make_parser():
                         'be ignored')
     parser.add_argument('--regular_y', action='store_true', default=False,
                         help='Is the top of the vessel at higher Y? (not the default)')
+    parser.add_argument('--pointcnn', action='store_true', default=False,
+                        help='Use PointCNN instead of our model')
+    parser.add_argument('--experiment', default=None,
+                        help='Experiment name')
+    parser.add_argument('-o', '--overrides', action='append',
+                        help='Configuration overrides')
 
     actions = parser.add_subparsers(dest='action')
 
@@ -84,7 +95,27 @@ def make_parser():
 
 
 args = make_parser().parse_args()
+OutlineNetConfig.set_overrides(
+    o.split('=', 1) for o in (args.overrides or ())
+)
 train_test_ratio = args.train_to_test_ratio if args.action != CLASSIFY else None
+
+
+if args.experiment is not None:
+    cache_dir = os.path.join(args.experiment, 'cache')
+    summary_dir = os.path.join(args.experiment, 'summary')
+    git_summary = os.path.join(args.experiment, 'git-status.txt')
+    config_summary = os.path.join(args.experiment, 'config-status.json')
+    model_path = os.path.join(args.experiment, args.model_path)
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(summary_dir, exist_ok=True)
+else:
+    cache_dir = args.cache_dir
+    summary_dir = args.summary_dir
+    git_summary = None
+    config_summary = None
+    model_path = args.model_path
+
 
 if args.disable_tensorflow_logs:
     import tensorflow as tf
@@ -93,49 +124,77 @@ if args.disable_tensorflow_logs:
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 
-elif args.svg_inputs:
-    data = SherdSVGDataset(data_root=args.data_dir, regular_y=args.regular_y, train_to_test_ratio=train_test_ratio)
+if args.svg_inputs:
+    point_data = SherdSVGDataset(data_root=args.data_dir, regular_y=args.regular_y, train_to_test_ratio=train_test_ratio)
 else:
-    data = SherdDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
+    point_data = SherdDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
 
 if args.label_mapping_file:
     with open(args.label_mapping_file, 'r') as f:
-        data.label_map = json.load(f)
-    data.loose_label_map = args.loose_mapping
+        point_data.label_map = json.load(f)
+    point_data.loose_label_map = args.loose_mapping
 
-data.enable_cache()
 
 if args.action == TRAIN:
-    data.do_noise = True
+    config = OutlineNetConfig()
+
+    if os.path.exists(config_summary):
+        print('Restoring previous config')
+        with open(config_summary, 'r') as f:
+            config.from_json(json.load(f))
+
+    data = point_data
+    model_type = model.Classifier
+
+    data.enable_cache()
+    data.eval_mode = False
     data.balance = True
+    data.do_caching = True
+    data.data_spec = config.data_spec
 
     if args.eval_set:
-        eval_data = SherdSVGDataset(data_root=args.eval_set, regular_y=args.regular_y)
-        eval_data.do_noise = False
+        eval_type = SherdSVGDataset
+        eval_data = eval_type(data_root=args.eval_set, regular_y=args.regular_y)
+        eval_data.eval_mode = True
         eval_data.balance = False
+        eval_data.do_caching = True
+        eval_data.data_spec = config.data_spec
         eval_data.label_map = data.label_map
-        eval_data.loose_label_map = data.loose_label_map
+        eval_data.loose_label_map = eval_data.loose_label_map
     else:
         eval_data = None
 
-    c = Classifier(
-        data, K=NUM_POINT_DIMENSIONS,
-        summary_dir=args.summary_dir, cache_dir=args.cache_dir,
+    c = model_type(
+        data, config=config,
+        summary_dir=summary_dir, cache_dir=cache_dir,
         eval_data=eval_data
     )
+    c.log_guesses = args.k
     try:
+        if git_summary is not None:
+            with open(git_summary, 'w') as f:
+                f.write(c3d.util.git.get_git_status())
+        if config_summary is not None:
+            with open(config_summary, 'w') as f:
+                json.dump(config.to_json(), f, indent=2, sort_keys=True)
         c.train()
     except (KeyboardInterrupt, InterruptedError) as e:
         logging.warning('Training interrupted, saving our current model')
-    with open(args.model_path, 'wb') as f:
+    with open(model_path, 'wb') as f:
         pickle.dump(c, f)
 
 else:
-    data.do_noise = False
-    data.balance = False
-    with open(args.model_path, 'rb') as f:
+    with open(model_path, 'rb') as f:
         c = pickle.load(f)
+
+    config = c.config
+    data = point_data
+
     c.dataset = data
+    data.eval_mode = True
+    data.balance = False
+    data.do_caching = False
+    data.data_spec = c.config.data_spec
 
     def classify(files_batch_iter, keep_indices=False):
         for batch_ids, batchs_imgs in files_batch_iter:

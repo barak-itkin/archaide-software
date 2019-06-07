@@ -193,8 +193,8 @@ def sample_outline2_at_distances(outline, fractional_distances,
 
 
 def sample_outline2_angles_at_distances(outline, distances, sample_dist,
-                                        distances_sorted=False,
-                                        skip_invalid_segs=True):
+                                               distances_sorted=False,
+                                               skip_invalid_segs=True):
     assert isinstance(outline, c3d.datamodel.Outline2)
     polyline = get_outline2_polyline(outline)
     segments_to_zero = np.array([

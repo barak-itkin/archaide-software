@@ -29,6 +29,18 @@ class Profile2(JsonSerializable):
         )
         return self
 
+    def optimize_unused(self):
+        return Profile2(
+            outlines=[o.optimize_unused() for o in self.outlines],
+            simplification_area=self.simplification_area
+        )
+
+    def scale(self, factor):
+        return Profile2(
+            outlines=[o.scale(factor) for o in self.outlines],
+            simplification_area=self.simplification_area * factor * factor,
+        )
+
     def serialize(self):
         return {
             'outlines': [o.serialize() for o in self.outlines],

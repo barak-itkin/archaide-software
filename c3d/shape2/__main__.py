@@ -13,8 +13,9 @@ from IPython import embed
 from c3d.classification import ConfusionMatrix
 import c3d.util.git
 from c3d.shape2.outlinenet import OutlineNetConfig
-from . import model
+from . import model, model_image
 from .gen_pcl_dataset import SherdSVGDataset, SherdDataset
+from .gen_pcl_dataset import SherdSVGImageDataset, SherdImageDataset
 
 FORMAT = '%(asctime)-15s %(message)s'
 logging.basicConfig(stream=sys.stdout, format=FORMAT, level=logging.DEBUG)
@@ -117,6 +118,13 @@ else:
     model_path = args.model_path
 
 
+config = OutlineNetConfig()
+if os.path.exists(config_summary):
+    print('Restoring previous config')
+    with open(config_summary, 'r') as f:
+        config.from_json(json.load(f))
+
+
 if args.disable_tensorflow_logs:
     import tensorflow as tf
     tf.logging.set_verbosity(tf.logging.ERROR)
@@ -125,26 +133,26 @@ if args.disable_tensorflow_logs:
 
 
 if args.svg_inputs:
-    point_data = SherdSVGDataset(data_root=args.data_dir, regular_y=args.regular_y, train_to_test_ratio=train_test_ratio)
+    point_data = SherdSVGDataset(data_root=args.data_dir, regular_y=args.regular_y, svg_scale=config.data_spec.svg_scale, train_to_test_ratio=train_test_ratio)
+    image_data = SherdSVGImageDataset(data_root=args.data_dir, regular_y=args.regular_y, train_to_test_ratio=train_test_ratio)
 else:
     point_data = SherdDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
+    image_data = SherdImageDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
 
 if args.label_mapping_file:
     with open(args.label_mapping_file, 'r') as f:
-        point_data.label_map = json.load(f)
+        point_data.label_map = image_data.label_map = json.load(f)
     point_data.loose_label_map = args.loose_mapping
+    image_data.loose_label_map = args.loose_mapping
 
 
 if args.action == TRAIN:
-    config = OutlineNetConfig()
-
-    if os.path.exists(config_summary):
-        print('Restoring previous config')
-        with open(config_summary, 'r') as f:
-            config.from_json(json.load(f))
-
-    data = point_data
-    model_type = model.Classifier
+    if config.use_images:
+        data = image_data
+        model_type = model_image.ImageClassifier
+    else:
+        data = point_data
+        model_type = model.Classifier
 
     data.enable_cache()
     data.eval_mode = False
@@ -153,7 +161,7 @@ if args.action == TRAIN:
     data.data_spec = config.data_spec
 
     if args.eval_set:
-        eval_type = SherdSVGDataset
+        eval_type = SherdSVGImageDataset if config.use_images else SherdSVGDataset
         eval_data = eval_type(data_root=args.eval_set, regular_y=args.regular_y)
         eval_data.eval_mode = True
         eval_data.balance = False
@@ -188,7 +196,10 @@ else:
         c = pickle.load(f)
 
     config = c.config
-    data = point_data
+    if config.use_images:
+        data = image_data
+    else:
+        data = point_data
 
     c.dataset = data
     data.eval_mode = True

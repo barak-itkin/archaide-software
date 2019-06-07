@@ -151,6 +151,8 @@ class DataSpec(NestedDict):
         # Scale all points from mm to 0.1 meters
         self.global_scale = 0.01
         self.augment_train = True
+        # Additional scale to apply to SVG inputs
+        self.svg_scale = 1
 
         # Maximal noise range (2 * radius) for each point,
         # in the original input scale
@@ -268,6 +270,7 @@ class OutlineNetConfig(NestedDict):
         self.data_spec = DataSpec()
         self.model_spec = ModelSpec(n_classes=n_classes)
         self.pointcnn_spec = PointCNNSpec(num_class=n_classes)
+        self.use_images = False
         for name, val in OutlineNetConfig.overrides:
             self.set_via_string(name, val)
 

@@ -178,14 +178,16 @@ def try_close(outline2, distance_th):
         return outline2
 
 
-def compute_profile2(drawing, distance_th=0.5, has_rot_axis=True, regular_y=False):
-    assert BASE_INNER_PROFILE_ID in drawing
-    assert BASE_OUTER_PROFILE_ID in drawing
+def compute_profile2(drawing, distance_th=2, has_rot_axis=True,
+                     regular_y=False, should_close=None, expect_single=True,
+                     assert_full=True):
+    assert BASE_INNER_PROFILE_ID in drawing or not assert_full
+    assert BASE_OUTER_PROFILE_ID in drawing or not assert_full
     if has_rot_axis and ROTATION_AXIS_ID not in drawing:
         raise DrawingError('Missing rotation axis')
 
     outlines = []
-    # To gaurantee consistant output, always sort the outlines by name
+    # To gaurantee consistent output, always sort the outlines by name
     for name, old_outline in sorted(drawing.outlines.items()):
         assert isinstance(old_outline, Outline)
         if 'handle' in name or name == ROTATION_AXIS_ID:
@@ -228,9 +230,8 @@ def compute_profile2(drawing, distance_th=0.5, has_rot_axis=True, regular_y=Fals
     for i, o in enumerate(outlines):
         outlines[i] = try_close(o, distance_th)
 
-    if len(outlines) > 1:
-        import ipdb
-        ipdb.set_trace()
+    if expect_single and len(outlines) > 1:
+        raise DrawingError('Failed to merge drawing to a single outline!')
 
     if has_rot_axis:
         axis_x = drawing[ROTATION_AXIS_ID].points[0][0]
@@ -249,6 +250,14 @@ def compute_profile2(drawing, distance_th=0.5, has_rot_axis=True, regular_y=Fals
         )
         for o in outlines
     ]
+
+    any_closed = any(o.is_closed for o in outlines)
+    if any_closed and should_close is False:
+        raise DrawingError('Merge result is closed form, but expected an open form!')
+
+    all_closed = all(o.is_closed for o in outlines)
+    if not all_closed and should_close is True:
+        raise DrawingError('Merge result is open form, but expected a closed form!')
 
     # Finally return the result
     return Profile2(outlines=outlines)

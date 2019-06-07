@@ -1,3 +1,4 @@
+import os
 from c3d.algorithm.drawings import compute_profile2
 from c3d.classification import Dataset
 from c3d.datamodel import load_json, Profile, Profile2, Outline2
@@ -23,25 +24,36 @@ class ProfileDataset(Dataset):
 
 
 class ProfileFractureDataset(Dataset):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.suffix = '.fracture-prof2.json'
+
     def file_filter(self, dirname, filename):
-        return filename.endswith('.fracture-prof2.json')
+        return filename.endswith(self.suffix)
 
     def prepare_file(self, file_id):
         return load_json(self.file_path(file_id), Profile2)
 
 
 class SherdSVGDataset(Dataset):
-    def __init__(self, *args, regular_y=False, **kwargs):
+    def __init__(self, *args, regular_y=False, svg_scale=1, **kwargs):
         super().__init__(*args, **kwargs)
         self.regular_y = regular_y
+        self.svg_scale = svg_scale
 
     def file_filter(self, dirname, filename):
         return filename.endswith('.svg')
 
     def prepare_file(self, file_id):
-        drawing = svg_import.drawing_from_svg(self.file_path(file_id))
+        path = self.file_path(file_id)
+        drawing = svg_import.drawing_from_svg(path)
         profile2 = compute_profile2(drawing, has_rot_axis=False,
-                                    regular_y=self.regular_y)
+                                    regular_y=self.regular_y, assert_full=False)
+        if os.path.exists(path + '.flip'):
+            # print('Flipping %s' % path)
+            profile2.outlines = [o.transform(lambda p: (-p[0], p[1])) for o in profile2.outlines]
+        if self.svg_scale != 1:
+            profile2 = profile2.scale(self.svg_scale)
         return profile2
 
 

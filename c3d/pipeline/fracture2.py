@@ -27,7 +27,7 @@ def generate_fractures(profile2, dst_dir, prefix, start, count, min_length):
         dst_file = os.path.join(dst_dir, f_name)
         if os.path.exists(dst_file):
             continue
-        frac = fracture_profile(profile2, min_length)
+        frac = fracture_profile(profile2, min_length).optimize_unused()
         frac.dump(dst_file, default=little_float)
 
 
@@ -89,7 +89,7 @@ if __name__ == '__main__':
     parser.add_argument('count', type=int,
                         help='Number of fractures per profile')
     parser.add_argument('--min_length', type=float, default=20,
-                        help='Number of fractures per profile')
+                        help='Smallest size (mm) of a fracture')
     parser.add_argument('--regular_y', action='store_true',
                         help='Is the top of the vessel at higher Y? (not the default)')
     args = parser.parse_args()

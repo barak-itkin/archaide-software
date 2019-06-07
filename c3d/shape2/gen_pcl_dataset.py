@@ -4,6 +4,7 @@ import c3d.algorithm.sample as sample_m
 import c3d.classification.dataset
 import c3d.datamodel
 import c3d.shape2.input
+import c3d.pipeline.rasterizer
 import numpy as np
 
 from c3d.datamodel import Profile2, Outline2
@@ -219,6 +220,25 @@ class FractureSamplingInputMixin(c3d.classification.dataset.Dataset):
             raise
 
 
+class FractureImageInputMixin(FractureSamplingInputMixin):
+    class PointsHandler:
+        def get_outline(self, points):
+            return c3d.datamodel.Outline(points)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rasterizer = c3d.pipeline.rasterizer.Rasterizer(
+            self.PointsHandler(),
+            width=256, height=256, antialias=False
+        )
+
+    def per_run_augment(self, file_id, prepared):
+        points, inside_map, n_points = super().per_run_augment(
+            file_id, prepared
+        )
+        return np.asarray(self.rasterizer.rasterize(points))
+
+
 class ProfileDataset(FractureSamplingInputMixin, c3d.shape2.input.ProfileDataset):
     pass
 
@@ -228,4 +248,16 @@ class SherdDataset(FractureSamplingInputMixin, c3d.shape2.input.ProfileFractureD
 
 
 class SherdSVGDataset(FractureSamplingInputMixin, c3d.shape2.input.SherdSVGDataset):
+    pass
+
+
+class ProfileImageDataset(FractureImageInputMixin, c3d.shape2.input.ProfileDataset):
+    pass
+
+
+class SherdImageDataset(FractureImageInputMixin, c3d.shape2.input.ProfileFractureDataset):
+    pass
+
+
+class SherdSVGImageDataset(FractureImageInputMixin, c3d.shape2.input.SherdSVGDataset):
     pass

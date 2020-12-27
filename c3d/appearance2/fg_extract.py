@@ -186,7 +186,7 @@ class FgExtractBase(metaclass=abc.ABCMeta):
         if max(height, width) > 500:
             scale = 500 / max(height, width)
             img = skimage.transform.rescale(
-                img, scale, mode='reflect'
+                img, scale, mode='reflect', preserve_range=True, multichannel=True
             )
         else:
             scale = None

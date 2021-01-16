@@ -186,7 +186,7 @@ class SummaryLogger:
     def log_step(self, step):
         return SummaryLogger.StepLogger(self, step)
 
-    def log_event(self, message, step=None, level=tf.LogMessage.INFO):
+    def log_event(self, message, step=None, level=tf.compat.v1.LogMessage.INFO):
         event = tf.Event()
         event.wall_time = time.time()
         if step is not None:

@@ -421,7 +421,7 @@ class BatchExtract(object):
             print('Under %s' % dst_dir)
             os.makedirs(dst_dir, exist_ok=True)
 
-            img = imageio.imread(path)
+            img = imgutils.img_to_float(imageio.imread(path))
             mask = self.extractor.extract(img)
 
             if self.store_mask and self._work_needed(mask_path):

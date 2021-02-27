@@ -102,7 +102,7 @@ def tf_autocrop(img):
 
 
 def img_to_uint8(img):
-    if type(img) is not np.ndarray:
+    if not isinstance(img, np.ndarray):
         raise ValueError('Images should be Numpy ndarray objects!')
     elif 'float' in img.dtype.name and img.max() <= 1:
         return np.uint8(255 * img)
@@ -111,7 +111,7 @@ def img_to_uint8(img):
 
 
 def img_to_float(img):
-    if type(img) is not np.ndarray:
+    if not isinstance(img, np.ndarray):
         raise ValueError('Images should be Numpy ndarray objects!')
     elif 'float' not in img.dtype.name and img.max() <= 255:
         return np.float32(img / 255.)

@@ -6,6 +6,7 @@ import imageio
 import multiprocessing
 import numpy as np
 import os
+import scipy.cluster
 import skimage.transform
 import skimage.measure
 import skimage.color
@@ -65,6 +66,22 @@ def get_labels(mask, part_threshold=0.02):
     return labeled_mask, n_labels
 
 
+# Compute the average error for approximating the specified part of the image
+# using at most K colors.
+def kcolor_error(img, mask, k):
+    """
+    Computes the mean (non-squared) error returned from approximating the image
+    using at most K colors.
+
+    In a checkerboard pattern, the image should be farewelly well approximated
+    by only two colors, whereas in colored patterns the error should be
+    much higher.
+    """
+    y, x = np.where(mask)
+    _, err = scipy.cluster.vq.kmeans(img[y, x], k)
+    return err
+
+
 def checkerboard_error(img, mask, min_corners=4):
     """
     Compute the "distance" between the given part of the image and a
@@ -116,6 +133,14 @@ def checkerboard_error(img, mask, min_corners=4):
     # Compute the geometric mean carefully to avoid overflows.
     log_scores = np.log(scores)
     return np.exp(np.mean(log_scores))
+
+
+def checkerboard_likelihood(img, mask):
+    """
+    Computes a combined likelihood score (higher=more likely) that the masked
+    part is a checkerboard pattern.
+    """
+    return -(checkerboard_error(img, mask) + kcolor_error(img, mask, 2))
 
 
 def n_channels(img):
@@ -272,9 +297,9 @@ class FgExtractWithRuler(FgExtractBase):
 
         # Step 5:
         # Identify which label is the checkerboard ruler and zero it out.
-        checkboard_label = min(
+        checkboard_label = max(
             range(1, n_labels),
-            key=lambda l: checkerboard_error(img, labeled_mask == l)
+            key=lambda l: checkerboard_likelihood(img, labeled_mask == l)
         )
         labeled_mask[labeled_mask == checkboard_label] = 0
 

@@ -463,7 +463,7 @@ def main():
     args = parser.parse_args()
 
     if not args.save_mask and not args.save_fg:
-        print('Must specify at least one result to save')
+        print('Must specify at least one result to save (--save_fg/--save_mask)')
         exit(1)
 
     if not os.path.exists(args.input_path):

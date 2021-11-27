@@ -8,6 +8,20 @@ should work with minor modifications also on Windows/Mac, this was not tested.
 ### Python
 You will need to use Python >= 3.5.2
 
+### IMPORTANT - Compatiability note (2021-11-27)
+
+*   As of 2021-11-27, the project does not work with TensorFlow v2 or Python
+    versions newer than 3.6.X.
+*   This is because of our dependency on
+    [PointNet](https://github.com/charlesq34/pointnet) (in our specific fork,
+    [barak-itkin/pointnet-archaide](https://github.com/barak-itkin/pointnet-archaide)
+    which was not migrated to TensorFlow v2.
+*   I would be happy to help on guiding others to migrate the code (for both
+    PointNet and ArchAIDE), but unfortunately I don't have the resources to do
+    so myself; I graduated from university multiple years ago, and so I don't
+    have access to the needed computing resources, and I'm also limited in the
+    time I have to continue working on this code.
+
 ### Required Python packages
 To run the code, you will need to have at least the following packages installed
 in your environment:
@@ -25,7 +39,6 @@ We recommend using `virtualenv` (or `conda`) to install these packages
 in an isolated environment. Once inside your Python environment, all packages
 can simply be installed with `pip`:
 
-```
 # Optional: create and use a virtualenv
 virtualenv venv/ -p python3
 source venv/bin/activate

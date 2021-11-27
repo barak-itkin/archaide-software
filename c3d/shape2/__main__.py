@@ -119,7 +119,7 @@ else:
 
 
 config = OutlineNetConfig()
-if os.path.exists(config_summary):
+if config_summary and os.path.exists(config_summary):
     print('Restoring previous config')
     with open(config_summary, 'r') as f:
         config.from_json(json.load(f))

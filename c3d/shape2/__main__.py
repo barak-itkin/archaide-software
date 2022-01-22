@@ -88,6 +88,12 @@ def make_parser():
 
     classify_parser = actions.add_parser(CLASSIFY,
                                          help='Classify given inputs')
+    classify_parser.add_argument('--compute_stats', default=False,
+                                action='store_true',
+                                help='If specified, assume the classification '
+                                'input directory is a regular dataset '
+                                'directory (with sub-folders per type) and '
+                                'compute model accuracy')
 
     eval_parser = actions.add_parser(EVAL,
                                      help='Load model and start IPython shell')
@@ -112,8 +118,8 @@ def main(argv=None):
         os.makedirs(cache_dir, exist_ok=True)
         os.makedirs(summary_dir, exist_ok=True)
     else:
-        cache_dir = args.cache_dir
-        summary_dir = args.summary_dir
+        cache_dir = getattr(args, 'cache_dir', None)
+        summary_dir = getattr(args, 'summary_dir', None)
         git_summary = None
         config_summary = None
         model_path = args.model_path
@@ -218,24 +224,27 @@ def main(argv=None):
                                       for prediction_indices in batch_prediction_indices]
 
         if args.action == CLASSIFY:
+            import numpy as np
             confusion = ConfusionMatrix(c.n_classes, args.k)
             for batch_ids, batch_predictions in classify(
                     data.files_batch_iter(batch_size=100, num_epochs=1), keep_indices=True):
-                batch_labels = [c.label_to_index[f.label] for f in batch_ids]
-                confusion.record(batch_labels, batch_predictions)
+                if args.compute_stats:
+                    batch_labels = [c.label_to_index[f.label] for f in batch_ids]
+                    confusion.record(batch_labels, batch_predictions)
                 for file_id, predictions in zip(batch_ids, batch_predictions):
                     # Intentionally print and don't log, so that the format is easy to
                     # expect and parse.
                     print(data.file_path(file_id))
                     for i, p in enumerate(predictions):
                         print('%3d: %s' % (i + 1, c.index_to_label[p]))
-            logging.info('Total:\n%s', confusion.n)
-            logging.info('Accuracy:\n%s', confusion.acc)
-            logging.info('Cumulative accuracy:\n%s', confusion.cumulative_acc)
-            logging.info('Class Accuracy:\n%s', np.nanmean(confusion.class_acc, axis=1))
-            logging.info('Cumulative Class accuracy:\n%s', np.nanmean(confusion.cumulative_class_acc, axis=1))
-            logging.info('Prediction histogram:\n%s',
-                         confusion.prediction_histogram[0])
+            if args.compute_stats:
+                logging.info('Total:\n%s', confusion.n)
+                logging.info('Accuracy:\n%s', confusion.acc)
+                logging.info('Cumulative accuracy:\n%s', confusion.cumulative_acc)
+                logging.info('Class Accuracy:\n%s', np.nanmean(confusion.class_acc, axis=1))
+                logging.info('Cumulative Class accuracy:\n%s', np.nanmean(confusion.cumulative_class_acc, axis=1))
+                logging.info('Prediction histogram:\n%s',
+                            confusion.prediction_histogram[0])
 
         elif args.action == TEST:
             confusion = ConfusionMatrix(c.n_classes, args.k)

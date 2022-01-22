@@ -96,7 +96,7 @@ def make_parser():
 
 
 def main(argv=None):
-    args = make_parser().parse_args()
+    args = make_parser().parse_args(argv)
     OutlineNetConfig.set_overrides(
         o.split('=', 1) for o in (args.overrides or ())
     )

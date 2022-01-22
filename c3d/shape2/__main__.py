@@ -95,172 +95,176 @@ def make_parser():
     return parser
 
 
-args = make_parser().parse_args()
-OutlineNetConfig.set_overrides(
-    o.split('=', 1) for o in (args.overrides or ())
-)
-train_test_ratio = args.train_to_test_ratio if args.action != CLASSIFY else None
-
-
-if args.experiment is not None:
-    cache_dir = os.path.join(args.experiment, 'cache')
-    summary_dir = os.path.join(args.experiment, 'summary')
-    git_summary = os.path.join(args.experiment, 'git-status.txt')
-    config_summary = os.path.join(args.experiment, 'config-status.json')
-    model_path = os.path.join(args.experiment, args.model_path)
-    os.makedirs(cache_dir, exist_ok=True)
-    os.makedirs(summary_dir, exist_ok=True)
-else:
-    cache_dir = args.cache_dir
-    summary_dir = args.summary_dir
-    git_summary = None
-    config_summary = None
-    model_path = args.model_path
-
-
-config = OutlineNetConfig()
-if config_summary and os.path.exists(config_summary):
-    print('Restoring previous config')
-    with open(config_summary, 'r') as f:
-        config.from_json(json.load(f))
-
-
-if args.disable_tensorflow_logs:
-    import tensorflow as tf
-    tf.logging.set_verbosity(tf.logging.ERROR)
-    # And also silence the native code
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-
-if args.svg_inputs:
-    point_data = SherdSVGDataset(data_root=args.data_dir, regular_y=args.regular_y, svg_scale=config.data_spec.svg_scale, train_to_test_ratio=train_test_ratio)
-    image_data = SherdSVGImageDataset(data_root=args.data_dir, regular_y=args.regular_y, train_to_test_ratio=train_test_ratio)
-else:
-    point_data = SherdDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
-    image_data = SherdImageDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
-
-if args.label_mapping_file:
-    with open(args.label_mapping_file, 'r') as f:
-        point_data.label_map = image_data.label_map = json.load(f)
-    point_data.loose_label_map = args.loose_mapping
-    image_data.loose_label_map = args.loose_mapping
-
-
-if args.action == TRAIN:
-    if config.use_images:
-        data = image_data
-        model_type = model_image.ImageClassifier
-    else:
-        data = point_data
-        model_type = model.Classifier
-
-    data.enable_cache()
-    data.eval_mode = False
-    data.balance = True
-    data.do_caching = True
-    data.data_spec = config.data_spec
-
-    if args.eval_set:
-        eval_type = SherdSVGImageDataset if config.use_images else SherdSVGDataset
-        eval_data = eval_type(data_root=args.eval_set, regular_y=args.regular_y)
-        eval_data.eval_mode = True
-        eval_data.balance = False
-        eval_data.do_caching = True
-        eval_data.data_spec = config.data_spec
-        eval_data.label_map = data.label_map
-        eval_data.loose_label_map = eval_data.loose_label_map
-    else:
-        eval_data = None
-
-    c = model_type(
-        data, config=config,
-        summary_dir=summary_dir, cache_dir=cache_dir,
-        eval_data=eval_data
+def main(argv=None):
+    args = make_parser().parse_args()
+    OutlineNetConfig.set_overrides(
+        o.split('=', 1) for o in (args.overrides or ())
     )
-    c.log_guesses = args.k
-    try:
-        if git_summary is not None:
-            with open(git_summary, 'w') as f:
-                f.write(c3d.util.git.get_git_status())
-        if config_summary is not None:
-            with open(config_summary, 'w') as f:
-                json.dump(config.to_json(), f, indent=2, sort_keys=True)
-        c.train()
-    except (KeyboardInterrupt, InterruptedError) as e:
-        logging.warning('Training interrupted, saving our current model')
-    with open(model_path, 'wb') as f:
-        pickle.dump(c, f)
+    train_test_ratio = args.train_to_test_ratio if args.action != CLASSIFY else None
 
-else:
-    with open(model_path, 'rb') as f:
-        c = pickle.load(f)
 
-    config = c.config
-    if config.use_images:
-        data = image_data
+    if args.experiment is not None:
+        cache_dir = os.path.join(args.experiment, 'cache')
+        summary_dir = os.path.join(args.experiment, 'summary')
+        git_summary = os.path.join(args.experiment, 'git-status.txt')
+        config_summary = os.path.join(args.experiment, 'config-status.json')
+        model_path = os.path.join(args.experiment, args.model_path)
+        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(summary_dir, exist_ok=True)
     else:
-        data = point_data
+        cache_dir = args.cache_dir
+        summary_dir = args.summary_dir
+        git_summary = None
+        config_summary = None
+        model_path = args.model_path
 
-    c.dataset = data
-    data.eval_mode = True
-    data.balance = False
-    data.do_caching = False
-    data.data_spec = c.config.data_spec
 
-    def classify(files_batch_iter, keep_indices=False):
-        for batch_ids, batchs_imgs in files_batch_iter:
-            batch_prediction_indices = c.predict_top_k(batchs_imgs, args.k)
-            if keep_indices:
-                yield batch_ids, batch_prediction_indices
-            else:
-                yield batch_ids, [[c.index_to_label[i] for i in prediction_indices]
-                                  for prediction_indices in batch_prediction_indices]
+    config = OutlineNetConfig()
+    if config_summary and os.path.exists(config_summary):
+        print('Restoring previous config')
+        with open(config_summary, 'r') as f:
+            config.from_json(json.load(f))
 
-    if args.action == CLASSIFY:
-        confusion = ConfusionMatrix(c.n_classes, args.k)
-        for batch_ids, batch_predictions in classify(
-                data.files_batch_iter(batch_size=100, num_epochs=1), keep_indices=True):
-            batch_labels = [c.label_to_index[f.label] for f in batch_ids]
-            confusion.record(batch_labels, batch_predictions)
-            for file_id, predictions in zip(batch_ids, batch_predictions):
-                # Intentionally print and don't log, so that the format is easy to
-                # expect and parse.
-                print(data.file_path(file_id))
-                for i, p in enumerate(predictions):
-                    print('%3d: %s' % (i + 1, c.index_to_label[p]))
-        logging.info('Total:\n%s', confusion.n)
-        logging.info('Accuracy:\n%s', confusion.acc)
-        logging.info('Cumulative accuracy:\n%s', confusion.cumulative_acc)
-        logging.info('Class Accuracy:\n%s', np.nanmean(confusion.class_acc, axis=1))
-        logging.info('Cumulative Class accuracy:\n%s', np.nanmean(confusion.cumulative_class_acc, axis=1))
-        logging.info('Prediction histogram:\n%s',
-                     confusion.prediction_histogram[0])
 
-    elif args.action == TEST:
-        confusion = ConfusionMatrix(c.n_classes, args.k)
-        batch_iter = data.files_batch_test_iter(batch_size=100, num_epochs=1)
-        for i, (batch_ids, batch_predictions) in enumerate(classify(
-                batch_iter, keep_indices=True)):
-            batch_labels = [f.label for f in batch_ids]
-            confusion.record(batch_labels, batch_predictions)
-            if i % 5 == 4:
-                logging.info('Done with batch %d' % i)
-        logging.info('Test accuracy:\n%s', confusion.acc)
-        logging.info('Cumulative test accuracy:\n%s', confusion.cumulative_acc)
-        logging.info('Prediction histogram:\n%s',
-                     confusion.prediction_histogram[0])
-
-    elif args.action == EVAL:
+    if args.disable_tensorflow_logs:
         import tensorflow as tf
-        import numpy as np
-        batch_iter = data.files_batch_test_iter(batch_size=100, num_epochs=1)
-        with c._tf_session.as_default() as sess:
-            tf_graph = tf.get_default_graph()
-            tf_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
-            tf_ops = dict((o.name, o) for o in tf_graph.get_operations())
-            tf_outs = dict((o.name, o)
-                           for op in tf_ops.values()
-                           for o in op.outputs)
-            tf_vals = dict((v.name, v.eval()) for v in tf_vars)
-            run = tf.get_default_session().run
-            embed()
+        tf.logging.set_verbosity(tf.logging.ERROR)
+        # And also silence the native code
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+
+    if args.svg_inputs:
+        point_data = SherdSVGDataset(data_root=args.data_dir, regular_y=args.regular_y, svg_scale=config.data_spec.svg_scale, train_to_test_ratio=train_test_ratio)
+        image_data = SherdSVGImageDataset(data_root=args.data_dir, regular_y=args.regular_y, train_to_test_ratio=train_test_ratio)
+    else:
+        point_data = SherdDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
+        image_data = SherdImageDataset(data_root=args.data_dir, train_to_test_ratio=train_test_ratio)
+
+    if args.label_mapping_file:
+        with open(args.label_mapping_file, 'r') as f:
+            point_data.label_map = image_data.label_map = json.load(f)
+        point_data.loose_label_map = args.loose_mapping
+        image_data.loose_label_map = args.loose_mapping
+
+
+    if args.action == TRAIN:
+        if config.use_images:
+            data = image_data
+            model_type = model_image.ImageClassifier
+        else:
+            data = point_data
+            model_type = model.Classifier
+
+        data.enable_cache()
+        data.eval_mode = False
+        data.balance = True
+        data.do_caching = True
+        data.data_spec = config.data_spec
+
+        if args.eval_set:
+            eval_type = SherdSVGImageDataset if config.use_images else SherdSVGDataset
+            eval_data = eval_type(data_root=args.eval_set, regular_y=args.regular_y)
+            eval_data.eval_mode = True
+            eval_data.balance = False
+            eval_data.do_caching = True
+            eval_data.data_spec = config.data_spec
+            eval_data.label_map = data.label_map
+            eval_data.loose_label_map = eval_data.loose_label_map
+        else:
+            eval_data = None
+
+        c = model_type(
+            data, config=config,
+            summary_dir=summary_dir, cache_dir=cache_dir,
+            eval_data=eval_data
+        )
+        c.log_guesses = args.k
+        try:
+            if git_summary is not None:
+                with open(git_summary, 'w') as f:
+                    f.write(c3d.util.git.get_git_status())
+            if config_summary is not None:
+                with open(config_summary, 'w') as f:
+                    json.dump(config.to_json(), f, indent=2, sort_keys=True)
+            c.train()
+        except (KeyboardInterrupt, InterruptedError) as e:
+            logging.warning('Training interrupted, saving our current model')
+        with open(model_path, 'wb') as f:
+            pickle.dump(c, f)
+
+    else:
+        with open(model_path, 'rb') as f:
+            c = pickle.load(f)
+
+        config = c.config
+        if config.use_images:
+            data = image_data
+        else:
+            data = point_data
+
+        c.dataset = data
+        data.eval_mode = True
+        data.balance = False
+        data.do_caching = False
+        data.data_spec = c.config.data_spec
+
+        def classify(files_batch_iter, keep_indices=False):
+            for batch_ids, batchs_imgs in files_batch_iter:
+                batch_prediction_indices = c.predict_top_k(batchs_imgs, args.k)
+                if keep_indices:
+                    yield batch_ids, batch_prediction_indices
+                else:
+                    yield batch_ids, [[c.index_to_label[i] for i in prediction_indices]
+                                      for prediction_indices in batch_prediction_indices]
+
+        if args.action == CLASSIFY:
+            confusion = ConfusionMatrix(c.n_classes, args.k)
+            for batch_ids, batch_predictions in classify(
+                    data.files_batch_iter(batch_size=100, num_epochs=1), keep_indices=True):
+                batch_labels = [c.label_to_index[f.label] for f in batch_ids]
+                confusion.record(batch_labels, batch_predictions)
+                for file_id, predictions in zip(batch_ids, batch_predictions):
+                    # Intentionally print and don't log, so that the format is easy to
+                    # expect and parse.
+                    print(data.file_path(file_id))
+                    for i, p in enumerate(predictions):
+                        print('%3d: %s' % (i + 1, c.index_to_label[p]))
+            logging.info('Total:\n%s', confusion.n)
+            logging.info('Accuracy:\n%s', confusion.acc)
+            logging.info('Cumulative accuracy:\n%s', confusion.cumulative_acc)
+            logging.info('Class Accuracy:\n%s', np.nanmean(confusion.class_acc, axis=1))
+            logging.info('Cumulative Class accuracy:\n%s', np.nanmean(confusion.cumulative_class_acc, axis=1))
+            logging.info('Prediction histogram:\n%s',
+                         confusion.prediction_histogram[0])
+
+        elif args.action == TEST:
+            confusion = ConfusionMatrix(c.n_classes, args.k)
+            batch_iter = data.files_batch_test_iter(batch_size=100, num_epochs=1)
+            for i, (batch_ids, batch_predictions) in enumerate(classify(
+                    batch_iter, keep_indices=True)):
+                batch_labels = [f.label for f in batch_ids]
+                confusion.record(batch_labels, batch_predictions)
+                if i % 5 == 4:
+                    logging.info('Done with batch %d' % i)
+            logging.info('Test accuracy:\n%s', confusion.acc)
+            logging.info('Cumulative test accuracy:\n%s', confusion.cumulative_acc)
+            logging.info('Prediction histogram:\n%s',
+                         confusion.prediction_histogram[0])
+
+        elif args.action == EVAL:
+            import tensorflow as tf
+            import numpy as np
+            batch_iter = data.files_batch_test_iter(batch_size=100, num_epochs=1)
+            with c._tf_session.as_default() as sess:
+                tf_graph = tf.get_default_graph()
+                tf_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
+                tf_ops = dict((o.name, o) for o in tf_graph.get_operations())
+                tf_outs = dict((o.name, o)
+                               for op in tf_ops.values()
+                               for o in op.outputs)
+                tf_vals = dict((v.name, v.eval()) for v in tf_vars)
+                run = tf.get_default_session().run
+                embed()
+
+if __name__ == '__main__':
+    main()
